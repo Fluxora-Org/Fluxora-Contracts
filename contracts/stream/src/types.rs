@@ -6,6 +6,15 @@ use soroban_sdk::{contracttype, Address, String};
 /// short identifiers like "payroll-001" or "grant-xyz-q1-2024".
 pub const MAX_REFERENCE_LENGTH: u32 = 64;
 
+/// Maximum number of distinct delegate grants stored for one stream.
+///
+/// The bound limits persistent-entry rent and keeps any future delegate
+/// enumeration bounded. Sixteen matches the contract's measured batch ceiling
+/// and caps one stream at 16 grant entries plus one counter entry. Replacing a
+/// grant for the same delegate does not use another slot; expired grants count
+/// until revoked or replaced because their storage entries still exist.
+pub const MAX_DELEGATES_PER_STREAM: u32 = 16;
+
 /// Bitmask constants for which operations a delegate is permitted to perform.
 ///
 /// Pass one constant or OR several together when calling [`crate::FluxoraStream::grant_delegate`].
@@ -430,4 +439,8 @@ pub enum DataKey {
     /// Instance storage. Unix seconds at which the halt was engaged; present
     /// if and only if the contract is halted.
     HaltedAt,
+    /// Persistent storage. Number of delegate grant entries for one stream.
+    /// Kept alive for the same TTL as the associated stream. Appended to
+    /// preserve every existing storage-key encoding.
+    DelegateCount(u64),
 }

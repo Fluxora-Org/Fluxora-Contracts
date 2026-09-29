@@ -57,9 +57,6 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
-    /// Reference string exceeds maximum allowed length.
-    InvalidReferenceLength = 40,
-
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
     Unauthorized = 7,
@@ -206,4 +203,22 @@ pub enum Error {
     /// what happens when an assumption cannot be checked at call time (a
     /// rebasing token).
     TokenAmountMismatch = 32,
-    // --- Monotonicity ---
+    /// A post-mutation check detected a decrease in the vested amount.
+    VestedDecreased = 33,
+    /// A state-changing entry point was called while the contract is halted.
+    ContractHalted = 34,
+    /// The one-time halt operator has already been installed.
+    HaltOperatorAlreadySet = 35,
+    /// `halt` or `resume_contract` was called before an operator was installed.
+    HaltOperatorNotSet = 36,
+    /// `halt` was called while the contract was already halted.
+    ContractAlreadyHalted = 37,
+    /// `resume_contract` was called while the contract was not halted.
+    ContractNotHalted = 38,
+    /// The token pool balance is below the total Fluxora accounts for.
+    PoolBalanceDrift = 39,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 40,
+    /// A stream already has `MAX_DELEGATES_PER_STREAM` distinct delegate grants.
+    TooManyDelegates = 41,
+}

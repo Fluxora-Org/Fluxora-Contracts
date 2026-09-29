@@ -89,7 +89,9 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord};
+use crate::types::{
+    DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord, MAX_DELEGATES_PER_STREAM,
+};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -507,20 +509,61 @@ pub fn debit_pool(env: &Env, token: &Address, amount: i128) -> Result<(), Error>
 // ---------------------------------------------------------------------------
 
 /// Persist a delegate grant, borrowing the stream's TTL.
-pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &DelegateGrant) {
+///
+/// A replacement does not consume an additional slot. New grants are rejected
+/// once the stream already has [`MAX_DELEGATES_PER_STREAM`] stored delegates.
+pub fn save_delegate(
+    env: &Env,
+    stream_id: u64,
+    delegate: &Address,
+    grant: &DelegateGrant,
+) -> Result<(), Error> {
     let key = DataKey::Delegate(stream_id, delegate.clone());
-    env.storage().persistent().set(&key, grant);
+    let persistent = env.storage().persistent();
+    let already_granted = persistent.has(&key);
+    let count_key = DataKey::DelegateCount(stream_id);
+    let count: u32 = persistent.get(&count_key).unwrap_or(0);
+
+    let next_count = if already_granted {
+        count
+    } else {
+        if count >= MAX_DELEGATES_PER_STREAM {
+            return Err(Error::TooManyDelegates);
+        }
+        count.checked_add(1).ok_or(Error::Overflow)?
+    };
+
+    persistent.set(&key, grant);
     // Give the grant at least as long to live as the stream itself.
     let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
     let target = ttl_target_ledgers(env, &stream);
-    env.storage().persistent().extend_ttl(&key, target, target);
+    persistent.extend_ttl(&key, target, target);
+
+    if next_count > 0 {
+        persistent.set(&count_key, &next_count);
+        persistent.extend_ttl(&count_key, target, target);
+    }
+    Ok(())
 }
 
 /// Remove a delegate grant.
 pub fn remove_delegate(env: &Env, stream_id: u64, delegate: &Address) {
     let key = DataKey::Delegate(stream_id, delegate.clone());
-    if env.storage().persistent().has(&key) {
-        env.storage().persistent().remove(&key);
+    let persistent = env.storage().persistent();
+    if persistent.has(&key) {
+        persistent.remove(&key);
+
+        let count_key = DataKey::DelegateCount(stream_id);
+        let count: u32 = persistent.get(&count_key).unwrap_or(0);
+        let next_count = count.saturating_sub(1);
+        if next_count == 0 {
+            persistent.remove(&count_key);
+        } else {
+            persistent.set(&count_key, &next_count);
+            let stream = peek_stream(env, stream_id).expect("stream must exist when revoking delegate");
+            let target = ttl_target_ledgers(env, &stream);
+            persistent.extend_ttl(&count_key, target, target);
+        }
     }
 }
 

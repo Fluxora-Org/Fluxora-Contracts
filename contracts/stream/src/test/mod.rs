@@ -58,6 +58,8 @@ mod cliff;
 // cannot move. See `docs/KNOWN-LIMITATIONS.md` §7.
 mod cliff_mode;
 mod delegation;
+// Issue #1729 — bound the number of distinct delegate grants per stream.
+mod delegate_cap;
 // Issue #1845: delegation surviving a recipient transfer.
 mod delegation_transfer;
 

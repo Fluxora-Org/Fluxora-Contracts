@@ -6,12 +6,12 @@ This document is the interface contract between `Fluxora-Contracts` and every
 consumer — `Fluxora-Backend`, `Fluxora-Frontend`, `fluxora-sdk`, and third-party
 integrators. Anything not described here is not part of the interface.
 
-| | |
-|---|---|
-| Protocol | 27 |
-| SDK | `soroban-sdk` 27.0.5 |
-| Testnet contract | `CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW` |
-| Wasm hash | `d47c96a344a79c614ab0dcf0eac62cc9384f6dc7f1d45c3f5109fb09658b035e` |
+|                       |                                                                    |
+| --------------------- | ------------------------------------------------------------------ |
+| Protocol              | 27                                                                 |
+| SDK                   | `soroban-sdk` 27.0.5                                               |
+| Testnet contract      | `CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW`         |
+| Wasm hash             | `d47c96a344a79c614ab0dcf0eac62cc9384f6dc7f1d45c3f5109fb09658b035e` |
 | Interface spec sha256 | `acdfd259c7f9a854d42c5da4cda43138fb71b757b604a21c6dac8a8a5a3a86d1` |
 
 > **Security status:** Automated testing includes property tests, a pool
@@ -56,14 +56,14 @@ stellar contract info interface --id CBCGTSCJ… --network testnet
 
 The core contract is **immutable** — no admin key, no upgrade path (see the
 [Upgrade posture](#upgrade-posture) above). The interface therefore cannot change on the deployed contract at
-all; a change means a *new deployment at a new address*.
+all; a change means a _new deployment at a new address_.
 
 So the freeze is a commitment about how we manage that:
 
-* **Compatible** (no version bump): adding a field to the *end* of an event
+- **Compatible** (no version bump): adding a field to the _end_ of an event
   payload; adding a new error discriminant; adding a new entry point in a future
   deployment.
-* **Breaking** (new address, new major version, migration note): renaming or
+- **Breaking** (new address, new major version, migration note): renaming or
   removing an entry point; changing any parameter's type, order or count;
   renaming a struct field; reordering event topics; renumbering an existing
   error discriminant; changing the meaning of a field.
@@ -87,12 +87,12 @@ changes update the snapshot only.
 
 ### ABI versions
 
-| version | scope |
-|---|---|
-| `1` | The frozen interface above, as deployed at `CBCGTSCJ…`. |
-| `2` | **Release curves (#1815).** `Stream` gained a `curve` field, `StreamCreated` gained a `curve` payload field, and the new `create_stream_with_curve` entry point was added. |
+| version | scope                                                                                                                                                                      |
+| ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `1`     | The frozen interface above, as deployed at `CBCGTSCJ…`.                                                                                                                    |
+| `2`     | **Release curves (#1815).** `Stream` gained a `curve` field, `StreamCreated` gained a `curve` payload field, and the new `create_stream_with_curve` entry point was added. |
 
-Version 2 is a *new deployment*, not an in-place upgrade (see Upgrade posture).
+Version 2 is a _new deployment_, not an in-place upgrade (see Upgrade posture).
 The version 1 surface is unchanged in meaning and still callable on the version 1
 deployment: `create_stream` keeps its exact signature and its exact linear
 arithmetic. What makes the change **breaking**, and therefore what requires the
@@ -142,11 +142,12 @@ change in a same-address deployment; any increase requires a new contract at a
 new address. Integrators should hard-code these values rather than probing with
 trial calls.
 
-| constant | value | applies to | notes |
-|---|---|---|---|
-| **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
-| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (34)](#error). |
-| `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
+| constant                       | value  | applies to                           | notes                                                                                                                                                                                                    |
+| ------------------------------ | ------ | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`MAX_BATCH_SIZE`**           | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
+| **`MAX_DELEGATES_PER_STREAM`** | **16** | `grant_delegate`                     | Maximum distinct delegate grant entries stored for one stream. A 17th new delegate returns [`TooManyDelegates` (41)](#error); replacing an existing delegate grant does not consume another slot.        |
+| **`MAX_REFERENCE_LENGTH`**     | **64** | `create_stream`                      | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (40)](#error).                                                          |
+| `MIN_RATE_STROOPS_PER_SECOND`  | 1      | `create_stream`, `top_up`            | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant.                                      |
 
 ### Derivation of `MAX_BATCH_SIZE = 16`
 
@@ -155,18 +156,18 @@ transaction), not entry or instruction counts. Each stream in a batch emits a
 `withdrawn` event plus the token's `transfer` event. Against the Stellar Asset
 Contract that is 512 bytes per stream, so a full batch of 16 spends 8,192 of the
 16,384-byte budget — a 2x margin. The other half of that cost belongs to the
-*token*, so a heavier transfer event moves the ceiling, which is why the number
+_token_, so a heavier transfer event moves the ceiling, which is why the number
 is re-derived by measurement rather than assumed.
 
 `test::token_batch_calibration` derives the implied ceiling for four token
 profiles of deliberately different cost:
 
-| token profile | per-transfer event bytes | events at 16 | implied ceiling |
-| --- | --- | --- | --- |
-| no transfer event | 0 | 4,416 / 16,384 | 59 |
-| Stellar Asset Contract (baseline) | 236 | 8,192 / 16,384 | 32 |
-| ~256-byte transfer event | 412 | 11,008 / 16,384 | 23 |
-| ~2 KB transfer event | 2,204 | 39,680 / 16,384 | 6 |
+| token profile                     | per-transfer event bytes | events at 16    | implied ceiling |
+| --------------------------------- | ------------------------ | --------------- | --------------- |
+| no transfer event                 | 0                        | 4,416 / 16,384  | 59              |
+| Stellar Asset Contract (baseline) | 236                      | 8,192 / 16,384  | 32              |
+| ~256-byte transfer event          | 412                      | 11,008 / 16,384 | 23              |
+| ~2 KB transfer event              | 2,204                    | 39,680 / 16,384 | 6               |
 
 **Sixteen is the measured ceiling for the Stellar Asset Contract and every
 lighter token, with the documented 2x safety factor.** A token with a heavier
@@ -186,6 +187,17 @@ every CI build under the `Resource report` step.
 Client-side chunking is transparent to integrators: each chunk is a separate,
 atomic `batch_withdraw` or `batch_extend_ttl` call, and the SDK retries on
 transient network errors per chunk.
+
+### Derivation of `MAX_DELEGATES_PER_STREAM = 16`
+
+Each distinct delegate occupies one persistent grant entry, and a stream with
+delegates also carries one persistent counter entry. The cap therefore limits
+the delegation side-car to at most 16 grant entries plus one counter per
+stream; this bounds its rent footprint and caps any future enumeration at 16
+items. Sixteen uses the already resource-tested batch cardinality as a
+conservative, familiar upper bound rather than permitting an unbounded set.
+Re-granting the same address does not allocate an entry; expired grants still
+count until revoked because their storage entries remain.
 
 ---
 
@@ -230,7 +242,7 @@ refused by the host while arguments are decoded, as a conversion error, so no
 and will only ever be appended, matching the rule for error codes.
 
 All amounts are `i128` in the token's smallest unit. **USDC on Stellar has 7
-decimals** — not 6, not 18. Amounts cross the JSON-RPC boundary as *strings*
+decimals** — not 6, not 18. Amounts cross the JSON-RPC boundary as _strings_
 (`"600000000"`), not numbers; a client that parses them as IEEE doubles will
 silently lose precision above 2^53.
 
@@ -238,12 +250,12 @@ silently lose precision above 2^53.
 
 Crosses the ABI as its **discriminant**, not its name.
 
-| value | name | terminal | meaning |
-|---|---|---|---|
-| `0` | `Active` | no | accruing |
-| `1` | `Paused` | no | accrual clock frozen; withdrawal still permitted |
-| `2` | `Cancelled` | yes | sender clawed back the unvested remainder |
-| `3` | `Depleted` | yes | ran to term and was fully withdrawn |
+| value | name        | terminal | meaning                                          |
+| ----- | ----------- | -------- | ------------------------------------------------ |
+| `0`   | `Active`    | no       | accruing                                         |
+| `1`   | `Paused`    | no       | accrual clock frozen; withdrawal still permitted |
+| `2`   | `Cancelled` | yes      | sender clawed back the unvested remainder        |
+| `3`   | `Depleted`  | yes      | ran to term and was fully withdrawn              |
 
 `Cancelled` is **sticky**: a cancelled stream later drained to zero stays
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
@@ -257,11 +269,11 @@ like the capability flags, this is a trust feature: a recipient who accepts a
 front-loaded stream has verified on chain that the shape cannot be flattened
 afterwards. Defaults to `Linear` when a stream is created with `create_stream`.
 
-| value | name | schedule between `start_time` and `end_time` |
-|---|---|---|
-| `0` | `Linear` | `floor(deposited × elapsed / duration)`. The original formula, unchanged. |
-| `1` | `Step` | Four equal tranches. Tranche *k* (for *k* in `1..=3`) opens once `ceil(k × duration / 4)` seconds have been consumed; the fourth is delivered at maturity. The recipient's claim jumps by a quarter of the deposit at each 25 / 50 / 75 / 100 % boundary and does not move in between. |
-| `2` | `FrontLoaded` | `f(u) = 2u − u²` on `u = elapsed / duration`, evaluated on a 1/1000 grid: accelerates early, decelerates into maturity. Ahead of or equal to `Linear` at every grid point while inside the schedule. |
+| value | name          | schedule between `start_time` and `end_time`                                                                                                                                                                                                                                           |
+| ----- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`   | `Linear`      | `floor(deposited × elapsed / duration)`. The original formula, unchanged.                                                                                                                                                                                                              |
+| `1`   | `Step`        | Four equal tranches. Tranche _k_ (for _k_ in `1..=3`) opens once `ceil(k × duration / 4)` seconds have been consumed; the fourth is delivered at maturity. The recipient's claim jumps by a quarter of the deposit at each 25 / 50 / 75 / 100 % boundary and does not move in between. |
+| `2`   | `FrontLoaded` | `f(u) = 2u − u²` on `u = elapsed / duration`, evaluated on a 1/1000 grid: accelerates early, decelerates into maturity. Ahead of or equal to `Linear` at every grid point while inside the schedule.                                                                                   |
 
 All curves share three properties, and those are what the contract's invariants
 rely on:
@@ -273,7 +285,7 @@ rely on:
    so `vested_of + refundable_of == deposited` holds at every instant whichever
    curve is selected.
 
-The variants differ only in *when* the deposit is delivered, never in how much.
+The variants differ only in _when_ the deposit is delivered, never in how much.
 A `Step` tranche threshold uses `ceil`, not `floor`, so a schedule shorter than
 four seconds does not release a tranche at `start_time`. `Linear` uses the
 original `floor` and is byte-for-byte identical to the pre-#1815 arithmetic — a
@@ -287,12 +299,12 @@ stored map positionally against the struct's field set, and reports
 `Error(Object, UnexpectedSize)` on a mismatch). Release curves therefore do **not**
 change the stored layout:
 
-* `DataKey::Stream(id)` still holds the frozen version 1 record — the version 1
+- `DataKey::Stream(id)` still holds the frozen version 1 record — the version 1
   field set, no `curve`.
-* A non-linear stream's curve is written to a side-car key,
+- A non-linear stream's curve is written to a side-car key,
   `DataKey::StreamCurve(id)`, which is kept alive with the same TTL as the record
   it annotates.
-* A **missing** side-car means `Linear`. Version 1 streams have no side-car, so
+- A **missing** side-car means `Linear`. Version 1 streams have no side-car, so
   they read back as exactly the stream they were created as, and a linear stream
   created today writes none either — it pays no rent for a key that would merely
   restate the default. No migration is required for a live deployment.
@@ -323,11 +335,11 @@ creation. `get_stream` returns the live `Stream` struct, which includes all
 three fields. `cliff_mode` is fixed the same way, but is not a capability: it
 selects a rule rather than denying an operation.
 
-| field | error when `false` | discriminant |
-|---|---|---|
-| `cancellable` | `NotCancellable` | 8 |
-| `pausable` | `NotPausable` | 9 |
-| `transferable` | `NotTransferable` | 10 |
+| field          | error when `false` | discriminant |
+| -------------- | ------------------ | ------------ |
+| `cancellable`  | `NotCancellable`   | 8            |
+| `pausable`     | `NotPausable`      | 9            |
+| `transferable` | `NotTransferable`  | 10           |
 
 **Creation-time semantics.** Flags are part of the initial `Stream` value
 written to persistent storage inside `create_stream`. They are never touched
@@ -342,9 +354,9 @@ variants) leaves all three flags unchanged.
 **Operation enforcement.** When a flag is `false`, the corresponding operation
 is rejected before any state change occurs:
 
-* `cancel` and `delegate_cancel` return `NotCancellable` (8).
-* `pause` and `delegate_pause` return `NotPausable` (9).
-* `transfer_recipient` and `delegate_transfer_recipient` return
+- `cancel` and `delegate_cancel` return `NotCancellable` (8).
+- `pause` and `delegate_pause` return `NotPausable` (9).
+- `transfer_recipient` and `delegate_transfer_recipient` return
   `NotTransferable` (10).
 
 **Trust model.** A recipient can call `get_stream` before accepting a stream
@@ -357,55 +369,56 @@ reassign the stream.
 
 Discriminants are ABI and are never renumbered; new variants are appended.
 
-| # | name | condition | status |
-|---:|---|---|---|
-| 1 | `StreamNotFound` | Requested stream has no readable storage entry. | reachable |
-| 2 | `InvalidTimeRange` | `end_time <= start_time`. | reachable |
-| 3 | `InvalidCliff` | `cliff_time` is outside `[start_time, end_time]`. | reachable |
-| 4 | `InvalidDeposit` | Deposit is zero or negative. | reachable |
-| 5 | `DepositRateTooLow` | Deposit is less than schedule duration in seconds. | reachable |
-| 6 | `SelfStream` | Sender and recipient are the same address. | reachable |
-| 7 | `Unauthorized` | Caller is not authorized for the requested operation. | reachable |
-| 8 | `NotCancellable` | Cancellation is attempted on a non-cancellable stream. | reachable |
-| 9 | `NotPausable` | Pause is attempted on a non-pausable stream. | reachable |
-| 10 | `NotTransferable` | Recipient transfer is attempted on a non-transferable stream. | reachable |
-| 11 | `StreamNotActive` | Reserved; current paths return more specific paused or terminated errors. | reserved |
-| 12 | `StreamNotPaused` | Resume is attempted when the stream is not paused. | reachable |
-| 13 | `StreamAlreadyPaused` | Pause is attempted when the stream is already paused. | reachable |
-| 14 | `StreamTerminated` | An operation requires a live stream but it is cancelled or depleted. | reachable |
-| 15 | `StreamMatured` | Top-up is attempted after the accrual end time. | reachable |
-| 16 | `InsufficientWithdrawable` | Explicit withdrawal exceeds a positive available balance. | reachable |
-| 17 | `NothingToWithdraw` | A live stream has no currently withdrawable balance. | reachable |
-| 18 | `InvalidAmount` | Explicit withdrawal or top-up amount is non-positive. | reachable |
-| 19 | `BatchTooLarge` | Batch has more than `MAX_BATCH_SIZE = 16` IDs. | reachable |
-| 20 | `EmptyBatch` | Batch has no stream IDs. | reachable |
-| 21 | `DuplicateStreamId` | Batch contains the same stream ID more than once. | reachable |
-| 22 | `Overflow` | Checked arithmetic overflows or underflows. | reachable |
-| 23 | `TopUpTooSmall` | Positive top-up cannot extend the schedule by at least one second. | reachable |
-| 24 | `StreamIdExhausted` | Next stream ID is `u64::MAX`; allocation cannot wrap. | reachable |
-| 25 | `TokenTransferFailed` | Token contract returns a typed transfer error. | reachable |
-| 26 | `TokenMissing` | Reserved; missing-token host abort cannot be distinguished in native tests. | reserved |
-| 27 | `DelegateNotPermitted` | Delegate uses an operation not included in its grant. | reachable |
-| 28 | `DelegateExpired` | Delegate uses a grant after its expiry. | reachable |
-| 29 | `MalformedStreamId` | Reserved; typed `Vec<u64>` prevents malformed IDs reaching contract code. | reserved |
-| 30 | `RepeatedTransfer` | Recipient transfer targets the current recipient. | reachable |
-| 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
-| 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
-| 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
-| 34 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
-| 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
-| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
-| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
-| 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
-| 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
-| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
+|   # | name                       | condition                                                                                                                              | status    |
+| --: | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+|   1 | `StreamNotFound`           | Requested stream has no readable storage entry.                                                                                        | reachable |
+|   2 | `InvalidTimeRange`         | `end_time <= start_time`.                                                                                                              | reachable |
+|   3 | `InvalidCliff`             | `cliff_time` is outside `[start_time, end_time]`.                                                                                      | reachable |
+|   4 | `InvalidDeposit`           | Deposit is zero or negative.                                                                                                           | reachable |
+|   5 | `DepositRateTooLow`        | Deposit is less than schedule duration in seconds.                                                                                     | reachable |
+|   6 | `SelfStream`               | Sender and recipient are the same address.                                                                                             | reachable |
+|   7 | `Unauthorized`             | Caller is not authorized for the requested operation.                                                                                  | reachable |
+|   8 | `NotCancellable`           | Cancellation is attempted on a non-cancellable stream.                                                                                 | reachable |
+|   9 | `NotPausable`              | Pause is attempted on a non-pausable stream.                                                                                           | reachable |
+|  10 | `NotTransferable`          | Recipient transfer is attempted on a non-transferable stream.                                                                          | reachable |
+|  11 | `StreamNotActive`          | Reserved; current paths return more specific paused or terminated errors.                                                              | reserved  |
+|  12 | `StreamNotPaused`          | Resume is attempted when the stream is not paused.                                                                                     | reachable |
+|  13 | `StreamAlreadyPaused`      | Pause is attempted when the stream is already paused.                                                                                  | reachable |
+|  14 | `StreamTerminated`         | An operation requires a live stream but it is cancelled or depleted.                                                                   | reachable |
+|  15 | `StreamMatured`            | Top-up is attempted after the accrual end time.                                                                                        | reachable |
+|  16 | `InsufficientWithdrawable` | Explicit withdrawal exceeds a positive available balance.                                                                              | reachable |
+|  17 | `NothingToWithdraw`        | A live stream has no currently withdrawable balance.                                                                                   | reachable |
+|  18 | `InvalidAmount`            | Explicit withdrawal or top-up amount is non-positive.                                                                                  | reachable |
+|  19 | `BatchTooLarge`            | Batch has more than `MAX_BATCH_SIZE = 16` IDs.                                                                                         | reachable |
+|  20 | `EmptyBatch`               | Batch has no stream IDs.                                                                                                               | reachable |
+|  21 | `DuplicateStreamId`        | Batch contains the same stream ID more than once.                                                                                      | reachable |
+|  22 | `Overflow`                 | Checked arithmetic overflows or underflows.                                                                                            | reachable |
+|  23 | `TopUpTooSmall`            | Positive top-up cannot extend the schedule by at least one second.                                                                     | reachable |
+|  24 | `StreamIdExhausted`        | Next stream ID is `u64::MAX`; allocation cannot wrap.                                                                                  | reachable |
+|  25 | `TokenTransferFailed`      | Token contract returns a typed transfer error.                                                                                         | reachable |
+|  26 | `TokenMissing`             | Reserved; missing-token host abort cannot be distinguished in native tests.                                                            | reserved  |
+|  27 | `DelegateNotPermitted`     | Delegate uses an operation not included in its grant.                                                                                  | reachable |
+|  28 | `DelegateExpired`          | Delegate uses a grant after its expiry.                                                                                                | reachable |
+|  29 | `MalformedStreamId`        | Reserved; typed `Vec<u64>` prevents malformed IDs reaching contract code.                                                              | reserved  |
+|  30 | `RepeatedTransfer`         | Recipient transfer targets the current recipient.                                                                                      | reachable |
+|  31 | `InvalidTopUp`             | Reserved; non-positive top-ups are rejected as `InvalidAmount` first.                                                                  | reserved  |
+|  32 | `TokenAmountMismatch`      | Deposit pull changes pool balance by an unexpected amount.                                                                             | reachable |
+|  33 | `VestedDecreased`          | Reserved; current mutation paths preserve non-decreasing vested value.                                                                 | reserved  |
+|  34 | `ContractHalted`           | A state-changing entry point was called while the contract-level halt is engaged.                                                      | reachable |
+|  35 | `HaltOperatorAlreadySet`   | `set_halt_operator` was called after an operator was already installed.                                                                | reachable |
+|  36 | `HaltOperatorNotSet`       | `halt`/`resume_contract` was called on a contract with no operator installed.                                                          | reachable |
+|  37 | `ContractAlreadyHalted`    | `halt` was called while the contract was already halted.                                                                               | reachable |
+|  38 | `ContractNotHalted`        | `resume_contract` was called while the contract was not halted.                                                                        | reachable |
+|  39 | `PoolBalanceDrift`         | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for.                                     | reachable |
+|  40 | `InvalidReferenceLength`  | Optional stream reference exceeds `MAX_REFERENCE_LENGTH = 64`.                                                                         | reachable |
+|  41 | `TooManyDelegates`         | `grant_delegate` would add a distinct delegate after the stream reached `MAX_DELEGATES_PER_STREAM = 16`.                               | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
-* `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
-* `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
-* `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
-* `PoolBalanceDrift` (34) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
+- `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
+- `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
+- `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
+- `PoolBalanceDrift` (34) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A _surplus_ is tolerated, never reported; see "Token assumptions" below.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
 
@@ -417,7 +430,7 @@ each is documented in the table above and in `test::error_reachability`, and
 none of them has a reachable path through a public entry point. Do not
 renumber or remove them.
 
-`VestedDecreased` (33) is the one *defensive invariant* in that list rather than
+`VestedDecreased` (33) is the one _defensive invariant_ in that list rather than
 a superseded error: `test::vested_decreased` searches randomized operation
 sequences against paused, cliffed and near-maximum streams, observes the
 contract error each call returns, and confirms the guard never fires. It is kept
@@ -468,7 +481,7 @@ balance delta still match, a decimal-assumption mismatch is not rejected.
 > including the transfer that already happened, is rolled back by the host.
 > No funds move and no phantom entry is written.
 >
-> This guards the *deposit* leg only. A fee taken on the *outbound* leg
+> This guards the _deposit_ leg only. A fee taken on the _outbound_ leg
 > (`withdraw`'s payout, `cancel`'s refund) is not detected, and does not need
 > to be: it is the recipient's or sender's own balance that comes up short,
 > not the pool's — the pool still drops by exactly the amount the contract
@@ -511,13 +524,13 @@ stream's `deposited - withdrawn`.
 as a no-op or a revert is immaterial.** Every entry point that could reach the
 token with a non-positive amount is rejected first, before any token call:
 
-| path | guard |
-|---|---|
-| `create_stream` | `deposit > 0`, else `InvalidDeposit` (4) |
-| `top_up` / `delegate_top_up` | `amount > 0`, else `InvalidAmount` (18); schedule delta must be nonzero, else `TopUpTooSmall` (23) |
-| `withdraw` / `delegate_withdraw` | `NothingToWithdraw` (17) short-circuits before any payout of zero |
-| `batch_withdraw` | a stream with nothing currently available is skipped, not paid a zero |
-| `cancel` / `delegate_cancel` | the refund transfer is only called when `refund > 0` |
+| path                             | guard                                                                                              |
+| -------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `create_stream`                  | `deposit > 0`, else `InvalidDeposit` (4)                                                           |
+| `top_up` / `delegate_top_up`     | `amount > 0`, else `InvalidAmount` (18); schedule delta must be nonzero, else `TopUpTooSmall` (23) |
+| `withdraw` / `delegate_withdraw` | `NothingToWithdraw` (17) short-circuits before any payout of zero                                  |
+| `batch_withdraw`                 | a stream with nothing currently available is skipped, not paid a zero                              |
+| `cancel` / `delegate_cancel`     | the refund transfer is only called when `refund > 0`                                               |
 
 `test::token_errors` pins all three assumptions down: a fee-on-transfer
 mock is rejected on both `create_stream` and `top_up`; a token that panics on
@@ -536,23 +549,23 @@ the tolerated-surplus boundary.
 
 ### Lifecycle
 
-| function | auth | returns |
-|---|---|---|
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
-| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)` | sender | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream) |
-| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_with_cliff_mode) |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)` | sender | `u64` stream id |
-| `top_up(stream_id, amount)` | sender | — |
-| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
-| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
-| `cancel(stream_id)` | sender | — |
-| `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
-| `pause(stream_id)` / `resume(stream_id)` | sender | — |
-| `transfer_recipient(stream_id, new_recipient)` | recipient | — |
-| `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
+| function                                                                                                                                              | auth                | returns                                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------- |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)`                             | sender              | `u64` stream id                                                            |
+| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)`           | sender              | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)`                             | sender              | `u64` stream id — [details](#create_stream)                                |
+| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender              | `u64` stream id — [details](#create_stream_with_cliff_mode)                |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)`                  | sender              | `u64` stream id                                                            |
+| `top_up(stream_id, amount)`                                                                                                                           | sender              | —                                                                          |
+| `withdraw(stream_id, amount: Option<i128>)`                                                                                                           | recipient           | `i128` paid                                                                |
+| `batch_withdraw(recipient, stream_ids: Vec<u64>)`                                                                                                     | recipient           | `i128` total — [details](#batch_withdraw)                                  |
+| `withdraw(stream_id, amount: Option<i128>)`                                                                                                           | recipient           | `i128` paid — [details](#withdraw)                                         |
+| `batch_withdraw(recipient, stream_ids: Vec<u64>)`                                                                                                     | recipient           | `i128` total                                                               |
+| `cancel(stream_id)`                                                                                                                                   | sender              | —                                                                          |
+| `batch_cancel(sender, stream_ids: Vec<u64>)`                                                                                                          | sender              | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64)    |
+| `pause(stream_id)` / `resume(stream_id)`                                                                                                              | sender              | —                                                                          |
+| `transfer_recipient(stream_id, new_recipient)`                                                                                                        | recipient           | —                                                                          |
+| `revoke_delegate(stream_id, grantor, delegate)`                                                                                                       | sender or recipient | —                                                                          |
 
 `withdraw` with `amount = None` draws the full available balance.
 
@@ -581,13 +594,13 @@ date by the paused duration.
 
 **Errors.**
 
-| variant | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. |
-| `NotPausable` | 9 | The stream was created with `pausable = false`. |
-| `StreamAlreadyPaused` | 13 | The stream is already `Paused`. |
-| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamAlreadyPaused`. |
-| `VestedDecreased` | 33 | Defensive only: the post-pause accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract. |
+| variant               | #   | condition                                                                                                                                                                                   |
+| --------------------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StreamNotFound`      | 1   | No readable entry for `stream_id`: the id was never issued, or its entry has been archived.                                                                                                 |
+| `NotPausable`         | 9   | The stream was created with `pausable = false`.                                                                                                                                             |
+| `StreamAlreadyPaused` | 13  | The stream is already `Paused`.                                                                                                                                                             |
+| `StreamTerminated`    | 14  | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamAlreadyPaused`. |
+| `VestedDecreased`     | 33  | Defensive only: the post-pause accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract.                                                |
 
 This list was cross-checked against `FluxoraStream::pause` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the five
@@ -644,6 +657,7 @@ timestamp that has not advanced — or has gone backwards relative to `paused_at
 is already `Active` returns `StreamNotPaused`, not a no-op success. A
 non-pausable stream can never satisfy the precondition either, because `pause`
 is the only transition into `Paused`.
+
 #### `top_up(stream_id, amount)` — extend duration, keep the rate
 
 `top_up` adds funds to a live stream without changing the per-second rate the
@@ -674,6 +688,7 @@ Paused streams may be topped up: `Paused` is not terminal. Matured streams
 (accrual clock already at `end_time`) and terminal streams (`Cancelled` /
 `Depleted`) cannot. On success the sender's token balance is transferred into
 the contract via a SEP-41 `transfer`.
+
 #### `revoke_delegate(stream_id, grantor, delegate)` — revoke a delegate grant immediately
 
 `revoke_delegate` removes the delegate grant stored for the pair
@@ -722,8 +737,8 @@ change is a single storage write plus one event.
 
 **Parameters.**
 
-| parameter | type | valid range |
-|---|---|---|
+| parameter   | type  | valid range                                                                                                                                                                                                                                                          |
+| ----------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stream_id` | `u64` | An id of an existing, non-terminal stream whose `status` is `Paused`. Ids are monotonic and run `0..stream_count()`, so any issued id is accepted syntactically; a `stream_id` that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
 
 **Authorization.** The stream's `sender` must authorise the call
@@ -758,13 +773,13 @@ from this function).
 
 **Errors.**
 
-| variant | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. |
-| `StreamNotPaused` | 12 | The stream is not currently paused — `paused_at` is `None`, or `status` is `Active` (never paused, or already resumed). |
-| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamNotPaused`. |
-| `Overflow` | 22 | Defensive only: `paused_total + paused_duration` does not fit in `u64`. Unreachable for any stream created through the contract. Listed only so an integrator is never surprised by it. |
-| `VestedDecreased` | 33 | Defensive only: the post-resume accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract; `test::vested_decreased` searches for a trigger and finds none. |
+| variant            | #   | condition                                                                                                                                                                                                     |
+| ------------------ | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StreamNotFound`   | 1   | No readable entry for `stream_id`: the id was never issued, or its entry has been archived.                                                                                                                   |
+| `StreamNotPaused`  | 12  | The stream is not currently paused — `paused_at` is `None`, or `status` is `Active` (never paused, or already resumed).                                                                                       |
+| `StreamTerminated` | 14  | The stream is `Cancelled` or `Depleted`. Checked before the paused-state test, so a terminal stream that still carries a `paused_at` reports `StreamTerminated`, not `StreamNotPaused`.                       |
+| `Overflow`         | 22  | Defensive only: `paused_total + paused_duration` does not fit in `u64`. Unreachable for any stream created through the contract. Listed only so an integrator is never surprised by it.                       |
+| `VestedDecreased`  | 33  | Defensive only: the post-resume accrual-sanity check observed a lower vested amount. Unreachable for any stream created through the contract; `test::vested_decreased` searches for a trigger and finds none. |
 
 `NotPausable` (9) is a `pause`-only failure and is never returned by `resume`.
 This list was cross-checked against `FluxoraStream::resume` in
@@ -774,6 +789,7 @@ variants above are the complete set it can return.
 **Events.** Exactly one `resumed` event on success: topics `stream_id` and
 `sender`; payload `paused_duration` (seconds absorbed by this call, i.e. the
 elapsed pause) and `paused_total` (cumulative paused seconds after the call).
+
 ### `batch_withdraw`
 
 ```rust
@@ -785,6 +801,7 @@ and returns the total paid out, in the token's smallest unit (`i128`, a string
 over JSON-RPC). Unlike `withdraw` there is **no `amount` parameter**: every
 element is drained to its current balance. Use `withdrawable_of(id)` for a
 single stream's figure.
+
 ### `withdraw`
 
 ```rust
@@ -797,7 +814,7 @@ balance is `vested(now) - withdrawn`, where `vested` is zero until
 `cliff_time` is reached and then rises linearly (rounding down) to `deposited`
 by `end_time`.
 
-Pausing freezes *accrual* only: funds already earned remain withdrawable while
+Pausing freezes _accrual_ only: funds already earned remain withdrawable while
 `status == Paused`. A `Cancelled` stream that still holds an unwithdrawn
 residual (`withdrawn < deposited`) can also be drained; a `Depleted` stream, or
 any terminal stream with nothing left, cannot.
@@ -812,9 +829,9 @@ pause). `Cancelled` is sticky: draining a cancelled stream to zero leaves it
 
 #### Parameters
 
-| parameter | type | valid range / constraints |
-|---|---|---|
-| `recipient` | `Address` | The account that authorises the call and receives every payout. It is compared **by value** against each `Stream.recipient`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`. |
+| parameter    | type       | valid range / constraints                                                                                                                                                                                                                                                                                    |
+| ------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `recipient`  | `Address`  | The account that authorises the call and receives every payout. It is compared **by value** against each `Stream.recipient`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`.                      |
 | `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive. Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
 
 `MAX_BATCH_SIZE` is 16 because the binding mainnet constraint is the **contract
@@ -831,7 +848,7 @@ captured for one recipient cannot be replayed against another.
 
 #### Per-element behaviour
 
-1. The batch is *resolved and validated in full* before any storage write or
+1. The batch is _resolved and validated in full_ before any storage write or
    token call.
 2. A stream whose withdrawable balance is currently **zero** is **skipped**, not
    rejected: its TTL is extended on the touch and nothing else happens. This
@@ -854,14 +871,14 @@ where the repeats sit, so a corrected retry always behaves the same way.
 
 #### Events
 
-* One `withdrawn` event **per stream that paid out**, in batch order, with
+- One `withdrawn` event **per stream that paid out**, in batch order, with
   topics `stream_id`, `recipient` and payload `amount`, `withdrawn`,
   `deposited`, `status`.
-* Skipped (zero-balance) streams emit **nothing**, so a 16-element batch may
+- Skipped (zero-balance) streams emit **nothing**, so a 16-element batch may
   emit fewer than 16 events.
-* There is no aggregate or batch-level event; the return value is the only
+- There is no aggregate or batch-level event; the return value is the only
   total.
-* Each non-zero payout also triggers the token contract's own `transfer` event.
+- Each non-zero payout also triggers the token contract's own `transfer` event.
 
 #### Failure modes
 
@@ -869,18 +886,18 @@ Cross-checked against `batch_withdraw`'s implementation and the shared helpers
 it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 `apply_withdrawal` → `token_transfer`). No other discriminant is reachable.
 
-| error | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | An id in `stream_ids` does not exist, or has been archived out of the live ledger (see `stream_exists`). |
-| `Unauthorized` | 7 | A resolved stream's `recipient` differs from the `recipient` argument. |
-| `BatchTooLarge` | 19 | `stream_ids.len() > MAX_BATCH_SIZE` (16). |
-| `EmptyBatch` | 20 | `stream_ids` contains no elements. |
-| `DuplicateStreamId` | 21 | The same id appears more than once in the batch. |
-| `Overflow` | 22 | Checked arithmetic overflows while accruing a stream's balance or summing the batch total. |
-| `TokenTransferFailed` | 25 | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above. |
-| `TokenMissing` | 26 | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
-| `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
-| `PoolBalanceDrift` | 34 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
+| error                 | #   | condition                                                                                                                                                                                                                                  |
+| --------------------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `StreamNotFound`      | 1   | An id in `stream_ids` does not exist, or has been archived out of the live ledger (see `stream_exists`).                                                                                                                                   |
+| `Unauthorized`        | 7   | A resolved stream's `recipient` differs from the `recipient` argument.                                                                                                                                                                     |
+| `BatchTooLarge`       | 19  | `stream_ids.len() > MAX_BATCH_SIZE` (16).                                                                                                                                                                                                  |
+| `EmptyBatch`          | 20  | `stream_ids` contains no elements.                                                                                                                                                                                                         |
+| `DuplicateStreamId`   | 21  | The same id appears more than once in the batch.                                                                                                                                                                                           |
+| `Overflow`            | 22  | Checked arithmetic overflows while accruing a stream's balance or summing the batch total.                                                                                                                                                 |
+| `TokenTransferFailed` | 25  | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above.                           |
+| `TokenMissing`        | 26  | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved.                                                                                                                                           |
+| `MalformedStreamId`   | 29  | A serialized element of `stream_ids` does not decode as a `u64`.                                                                                                                                                                           |
+| `PoolBalanceDrift`    | 34  | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
 
 `StreamNotActive` (11) is reserved and is not returned here.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
@@ -904,6 +921,7 @@ the host before a typed error is produced.
 `sender`; payload `amount` (this top-up), `deposited` (total after the call),
 and `end_time` (extended schedule end). The token contract also emits its own
 `transfer` event for the deposit.
+
 #### `batch_cancel(sender, stream_ids: Vec<u64>)`
 
 ```rust
@@ -930,9 +948,9 @@ refused batch has `refunded == 0` and names the element that stopped it.
 
 ##### Parameters
 
-| parameter | type | valid range / constraints |
-|---|---|---|
-| `sender` | `Address` | The account that authorises the call and receives every refund. It is compared **by value** against each `Stream.sender`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`. |
+| parameter    | type       | valid range / constraints                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------ | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sender`     | `Address`  | The account that authorises the call and receives every refund. It is compared **by value** against each `Stream.sender`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive — the same ceiling and the same derivation as `batch_withdraw`: the binding constraint is the contract event budget, not entry or instruction counts. A cap-sized `batch_cancel` settles in 8 832 of 16 384 event bytes (~552 bytes per element, one `cancelled` event plus one token `transfer`), so the event budget alone would allow ~29 streams in a batch; the 16 cap leaves room but not the same 2x margin `batch_withdraw` has on that dimension (`test::resource_limits`). Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
 
 ##### Authorisation
@@ -943,7 +961,7 @@ call it, and neither can any other party.
 
 ##### Per-element behaviour
 
-1. The batch is *resolved and validated in full* before any storage write or
+1. The batch is _resolved and validated in full_ before any storage write or
    token call: existence, then ownership, then a price per element.
 2. Every refund is priced against a **single ledger timestamp**, read once at the
    top of the call, and each stream is priced exactly once. Members with
@@ -961,11 +979,11 @@ A stream that exists, belongs to `sender`, but cannot be cancelled — created w
 `cancellable = false`, or already `Cancelled` or `Depleted` — does **not** raise
 a typed `Error`. It refuses the batch and reports its own position:
 
-| field | value on a refusal |
-|---|---|
-| `refused_index` | zero-based offset in `stream_ids` of the **first** element that refused |
+| field            | value on a refusal                                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------------------- |
+| `refused_index`  | zero-based offset in `stream_ids` of the **first** element that refused                            |
 | `refused_reason` | `NotCancellable` (8) or `StreamTerminated` (14) — which of the two conditions stopped that element |
-| `refunded` | `0` — a refused batch changes nothing |
+| `refunded`       | `0` — a refused batch changes nothing                                                              |
 
 Elements are checked in batch order, so the report is deterministic for a given
 vector: with two pinned streams in the batch, the earlier position is always the
@@ -975,7 +993,7 @@ one named. Dropping that element and resubmitting settles the rest.
 as a bare `u32` discriminant — `Error(Contract, #N)` — and `#[contracterror]`
 enums can only carry unit variants, so no typed error can transport a position
 alongside a discriminant. Reporting only the condition would leave a caller
-holding a 16-id vector with no way to learn *which* element to drop, and a second
+holding a 16-id vector with no way to learn _which_ element to drop, and a second
 round-trip over the whole vector to find out. The index is data, so it travels
 in the data.
 
@@ -989,25 +1007,25 @@ for elements that had already been processed by the time the refusal was found.
 
 ##### Events
 
-* One `cancelled` event **per stream**, in batch order, with topics `stream_id`,
+- One `cancelled` event **per stream**, in batch order, with topics `stream_id`,
   `sender`, `recipient` and payload `refunded`, `vested`, `deposited`, `status`
   — the same payload a single `cancel` publishes.
-* There is no aggregate or batch-level event; the return value is the only total.
-* Each non-zero refund also triggers the token contract's own `transfer` event.
+- There is no aggregate or batch-level event; the return value is the only total.
+- Each non-zero refund also triggers the token contract's own `transfer` event.
 
 ##### Failure modes
 
-| error | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | An id in `stream_ids` does not exist, or has been archived out of the live ledger. As with `batch_withdraw`, unknown ids fail the batch rather than being skipped. |
-| `Unauthorized` | 7 | A resolved stream's `sender` differs from the `sender` argument. |
-| `BatchTooLarge` | 19 | `stream_ids.len() > MAX_BATCH_SIZE` (16). |
-| `EmptyBatch` | 20 | `stream_ids` contains no elements. |
-| `DuplicateStreamId` | 21 | The same id appears more than once in the batch. |
-| `Overflow` | 22 | Checked arithmetic overflows while accruing a stream's figures or summing the batch total. |
-| `TokenTransferFailed` | 25 | A refund's token transfer was rejected by the token contract. The raw token discriminant is discarded — see the `Error` table above. |
-| `TokenMissing` | 26 | A refund's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
-| `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
+| error                 | #   | condition                                                                                                                                                          |
+| --------------------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `StreamNotFound`      | 1   | An id in `stream_ids` does not exist, or has been archived out of the live ledger. As with `batch_withdraw`, unknown ids fail the batch rather than being skipped. |
+| `Unauthorized`        | 7   | A resolved stream's `sender` differs from the `sender` argument.                                                                                                   |
+| `BatchTooLarge`       | 19  | `stream_ids.len() > MAX_BATCH_SIZE` (16).                                                                                                                          |
+| `EmptyBatch`          | 20  | `stream_ids` contains no elements.                                                                                                                                 |
+| `DuplicateStreamId`   | 21  | The same id appears more than once in the batch.                                                                                                                   |
+| `Overflow`            | 22  | Checked arithmetic overflows while accruing a stream's figures or summing the batch total.                                                                         |
+| `TokenTransferFailed` | 25  | A refund's token transfer was rejected by the token contract. The raw token discriminant is discarded — see the `Error` table above.                               |
+| `TokenMissing`        | 26  | A refund's token address does not resolve to a deployed contract (host `Abort`). No funds moved.                                                                   |
+| `MalformedStreamId`   | 29  | A serialized element of `stream_ids` does not decode as a `u64`.                                                                                                   |
 
 `NotCancellable` (8) and `StreamTerminated` (14) are reachable only as
 `BatchCancelOutcome::refused_reason`, never as a returned `Error`: a caller sees
@@ -1020,21 +1038,24 @@ Stops accrual and refunds the unvested remainder to the sender. The recipient ke
 **Authorisation:** `sender`
 
 **Parameters:**
-* `stream_id` (`u64`): The ID of the stream to cancel. Valid range: an existing stream ID (`0..stream_count()`).
+
+- `stream_id` (`u64`): The ID of the stream to cancel. Valid range: an existing stream ID (`0..stream_count()`).
 
 **Errors:**
-* `StreamNotFound` (1): No stream exists with the given `stream_id`.
-* `NotCancellable` (8): The stream was created with `cancellable = false`.
-* `StreamTerminated` (14): The stream is already in the `Cancelled` or `Depleted` state.
-* `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
-* `TokenTransferFailed` (25): The token contract refused the refund transfer.
-* `TokenMissing` (26): The token contract does not exist.
-* `PoolBalanceDrift` (34): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
+
+- `StreamNotFound` (1): No stream exists with the given `stream_id`.
+- `NotCancellable` (8): The stream was created with `cancellable = false`.
+- `StreamTerminated` (14): The stream is already in the `Cancelled` or `Depleted` state.
+- `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
+- `TokenTransferFailed` (25): The token contract refused the refund transfer.
+- `TokenMissing` (26): The token contract does not exist.
+- `PoolBalanceDrift` (34): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
 
 **Events:**
-* `cancelled` — Emitted on success.
-| `stream_id` | `u64` | Id of an existing stream. Ids are monotonic in `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
-| `amount` | `Option<i128>` | `None` — pay the entire currently-withdrawable balance. `Some(n)` — `n` must be strictly positive (`> 0`) and at most the currently-withdrawable balance (`<= available`). Values are in the stream token's smallest unit. |
+
+- `cancelled` — Emitted on success.
+  | `stream_id` | `u64` | Id of an existing stream. Ids are monotonic in `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
+  | `amount` | `Option<i128>` | `None` — pay the entire currently-withdrawable balance. `Some(n)` — `n` must be strictly positive (`> 0`) and at most the currently-withdrawable balance (`<= available`). Values are in the stream token's smallest unit. |
 
 #### Authorisation
 
@@ -1045,17 +1066,17 @@ or wrong signature surfaces as a host authentication failure, not a typed
 
 #### Errors
 
-| variant | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
-| `InsufficientWithdrawable` | 16 | An explicit `Some(n)` was supplied, `available > 0`, and `n > available`. Never returned when `available == 0` — that path uses the empty-balance variants below instead. |
-| `NothingToWithdraw` | 17 | The stream is still live (`Active` or `Paused`) but the withdrawable balance is zero: pre-start, pre-cliff, fully drawn for the moment, or otherwise accrued-nothing-left-to-pay. |
-| `InvalidAmount` | 18 | An explicit `Some(n)` was supplied with `n <= 0`. |
-| `StreamTerminated` | 14 | The stream is `Cancelled` or `Depleted` and has nothing left to pay (`available == 0`). Distinct from `NothingToWithdraw` so a client can tell "wait for accrual" apart from "this stream is over" without a second round-trip. |
-| `Overflow` | 22 | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules. |
-| `TokenTransferFailed` | 25 | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules). |
-| `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
-| `PoolBalanceDrift` | 34 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
+| variant                    | #   | condition                                                                                                                                                                                                                                                         |
+| -------------------------- | --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StreamNotFound`           | 1   | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check.                                                                                                                       |
+| `InsufficientWithdrawable` | 16  | An explicit `Some(n)` was supplied, `available > 0`, and `n > available`. Never returned when `available == 0` — that path uses the empty-balance variants below instead.                                                                                         |
+| `NothingToWithdraw`        | 17  | The stream is still live (`Active` or `Paused`) but the withdrawable balance is zero: pre-start, pre-cliff, fully drawn for the moment, or otherwise accrued-nothing-left-to-pay.                                                                                 |
+| `InvalidAmount`            | 18  | An explicit `Some(n)` was supplied with `n <= 0`.                                                                                                                                                                                                                 |
+| `StreamTerminated`         | 14  | The stream is `Cancelled` or `Depleted` and has nothing left to pay (`available == 0`). Distinct from `NothingToWithdraw` so a client can tell "wait for accrual" apart from "this stream is over" without a second round-trip.                                   |
+| `Overflow`                 | 22  | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules.                            |
+| `TokenTransferFailed`      | 25  | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules).                                                                                                            |
+| `TokenMissing`             | 26  | The stream's token address has no deployed code (host Abort / trap).                                                                                                                                                                                              |
+| `PoolBalanceDrift`         | 34  | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely _short_ can never pay a recipient out of another stream's claim. |
 
 This list was cross-checked against `FluxoraStream::withdraw` and
 `FluxoraStream::apply_withdrawal` in
@@ -1076,7 +1097,7 @@ the deposit on a non-cancelled stream). The token contract also emits its own
 | `Unauthorized` | 7 | `grantor` is neither the stream's `sender` nor its `recipient`. |
 
 `DelegateNotPermitted` (27) and `DelegateExpired` (28) are **not** returned by
-`revoke_delegate` — they are raised when a delegate *uses* a grant. Revoking an
+`revoke_delegate` — they are raised when a delegate _uses_ a grant. Revoking an
 expired, non-permitted, or non-existent grant all succeed. This list was
 cross-checked against `FluxoraStream::revoke_delegate` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs); the two
@@ -1084,6 +1105,7 @@ variants above are the complete set it can return.
 
 **Events.** Exactly one `delegate_revoked` event on success, including the
 idempotent no-op case: topics `stream_id`, `grantor`, `delegate`; no payload.
+
 #### `create_stream_with_curve` — detailed reference
 
 Identical to [`create_stream`](#create_stream--detailed-reference) in every
@@ -1092,6 +1114,7 @@ respect — same authorization, same validation, same deposit pull, the same
 by the trailing `curve` parameter instead of defaulting to `Linear`.
 
 **Signature:**
+
 ```rust
 fn create_stream_with_curve(
     env: Env,
@@ -1114,9 +1137,9 @@ fn create_stream_with_curve(
 **Parameters:** every parameter has the same meaning, valid range and error
 behaviour as in `create_stream`; the only addition is:
 
-| parameter | type | description |
-|---|---|---|
-| `curve` | `ReleaseCurve` | The release shape above the cliff. `0` `Linear`, `1` `Step`, `2` `FrontLoaded` — see [`ReleaseCurve`](#releasecurve). Always one of those three variants; the parameter is never rejected. Immutable after creation and reported by `get_stream` and `stream_created`. |
+| parameter | type           | description                                                                                                                                                                                                                                                            |
+| --------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `curve`   | `ReleaseCurve` | The release shape above the cliff. `0` `Linear`, `1` `Step`, `2` `FrontLoaded` — see [`ReleaseCurve`](#releasecurve). Always one of those three variants; the parameter is never rejected. Immutable after creation and reported by `get_stream` and `stream_created`. |
 
 **Errors:** the error set is exactly `create_stream`'s. `curve` adds no failure
 mode: every variant is supported, and the schedule guards (`InvalidDeposit`,
@@ -1130,13 +1153,13 @@ too, because each curve's release fraction never exceeds 1.
 
 **Example.** The same 100-day, 1,000 USDC stream as above, on each curve:
 
-| offset | `Linear` (`0`) | `Step` (`1`) | `FrontLoaded` (`2`) |
-|---|---|---|---|
-| day 24 | 240 USDC | 0 USDC | 423 USDC |
-| day 25 | 250 USDC | 250 USDC | 438 USDC |
-| day 50 | 500 USDC | 500 USDC | 750 USDC |
-| day 75 | 750 USDC | 750 USDC | 938 USDC |
-| day 100 | 1,000 USDC | 1,000 USDC | 1,000 USDC |
+| offset  | `Linear` (`0`) | `Step` (`1`) | `FrontLoaded` (`2`) |
+| ------- | -------------- | ------------ | ------------------- |
+| day 24  | 240 USDC       | 0 USDC       | 423 USDC            |
+| day 25  | 250 USDC       | 250 USDC     | 438 USDC            |
+| day 50  | 500 USDC       | 500 USDC     | 750 USDC            |
+| day 75  | 750 USDC       | 750 USDC     | 938 USDC            |
+| day 100 | 1,000 USDC     | 1,000 USDC   | 1,000 USDC          |
 
 `Step` releases nothing until each quarter boundary and then jumps; `FrontLoaded`
 leads `Linear` all the way to maturity; all three settle at exactly the deposit.
@@ -1149,6 +1172,7 @@ deposit via the terminal settlement branch.)
 Create a payment stream and transfer `deposit` tokens from `sender` into the contract's pooled balance. Returns the new stream id (monotonic, never reused).
 
 **Signature:**
+
 ```rust
 fn create_stream(
     env: Env,
@@ -1170,46 +1194,46 @@ fn create_stream(
 
 **Parameters:**
 
-| parameter | type | description |
-|---|---|---|
-| `sender` | `Address` | Funding party. Must authorize the call. |
-| `recipient` | `Address` | Receiving party. Must differ from `sender`. |
-| `token` | `Address` | Token contract address (SEP-41). Per-stream, not contract-wide. |
-| `deposit` | `i128` | Initial amount to lock, in the token's smallest unit. The caller must scale for the token's actual `decimals()`; Fluxora does not query or normalize precision. Must be positive and satisfy rate constraints. |
-| `start_time` | `u64` | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream). |
-| `end_time` | `u64` | Accrual ends (unix seconds). Must be strictly greater than `start_time`. |
-| `cliff_time` | `u64` | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. How it is compared to the current time depends on `cliff_mode`, which `create_stream` fixes to `CliffMode::Schedule`: on a `pausable` stream this stored instant is then a lower bound, not the wall-clock instant the gate opens, because pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point and [`create_stream_with_cliff_mode`](#create_stream_with_cliff_mode). |
-| `cancellable` | `bool` | Whether sender may cancel. Immutable after creation. |
-| `pausable` | `bool` | Whether sender may pause accrual. Immutable after creation. |
-| `transferable` | `bool` | Whether recipient may reassign the stream. Immutable after creation. |
-| `reference` | `Option<String>` | Optional identifier for the stream (e.g., "payroll-001", "grant-xyz-q1"). Maximum 64 characters. Immutable after creation, returned by `get_stream` and included in the `StreamCreated` event. |
+| parameter      | type             | description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sender`       | `Address`        | Funding party. Must authorize the call.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `recipient`    | `Address`        | Receiving party. Must differ from `sender`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `token`        | `Address`        | Token contract address (SEP-41). Per-stream, not contract-wide.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `deposit`      | `i128`           | Initial amount to lock, in the token's smallest unit. The caller must scale for the token's actual `decimals()`; Fluxora does not query or normalize precision. Must be positive and satisfy rate constraints.                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `start_time`   | `u64`            | Accrual begins (unix seconds). May be past (backdated vesting), present, or future (scheduled stream).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `end_time`     | `u64`            | Accrual ends (unix seconds). Must be strictly greater than `start_time`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `cliff_time`   | `u64`            | Payout gate (unix seconds). Must be in `[start_time, end_time]`. Set equal to `start_time` for no cliff. **Gates payout, does not delay accrual** — at the cliff instant the recipient becomes entitled to everything accrued since `start_time`. How it is compared to the current time depends on `cliff_mode`, which `create_stream` fixes to `CliffMode::Schedule`: on a `pausable` stream this stored instant is then a lower bound, not the wall-clock instant the gate opens, because pausing pushes the opening instant forward by the accumulated `paused_total`. See the `resume` entry point and [`create_stream_with_cliff_mode`](#create_stream_with_cliff_mode). |
+| `cancellable`  | `bool`           | Whether sender may cancel. Immutable after creation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `pausable`     | `bool`           | Whether sender may pause accrual. Immutable after creation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `transferable` | `bool`           | Whether recipient may reassign the stream. Immutable after creation.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `reference`    | `Option<String>` | Optional identifier for the stream (e.g., "payroll-001", "grant-xyz-q1"). Maximum 64 characters. Immutable after creation, returned by `get_stream` and included in the `StreamCreated` event.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 
 **Valid Ranges and Constraints:**
 
-* **Time Range:** `end_time > start_time` (strictly greater). Duration must be at least 1 second. Zero-duration streams are rejected with `InvalidTimeRange`, not treated as "already vested".
-* **Cliff:** `cliff_time` must satisfy `start_time ≤ cliff_time ≤ end_time`. Both boundary values are legal: `cliff_time == start_time` means no cliff, `cliff_time == end_time` means a single lump-sum payout at maturity.
-* **Deposit:** Must be positive (`deposit > 0`).
-* **Rate Floor:** `deposit ≥ duration_in_seconds`, ensuring the per-second rate does not truncate to zero. For example, a one-year stream requires at least 31,536,000 stroops (~3.16 USDC with 7 decimals).
-* **Overflow Guard:** `deposit × duration` must fit in `i128`. This check at creation proves all future accrual multiplications cannot overflow.
-* **Self-Stream:** `sender ≠ recipient`.
-* **Clock Skew:** No validation limit on past or future timestamps. Backdated streams (past `start_time`) vest immediately for the elapsed portion. Scheduled streams (future `start_time`) accrue nothing until the start instant. Streams extending beyond the network's `max_entry_ttl` are funded to the horizon at creation; the permissionless `extend_stream_ttl` keeper path covers the remainder.
+- **Time Range:** `end_time > start_time` (strictly greater). Duration must be at least 1 second. Zero-duration streams are rejected with `InvalidTimeRange`, not treated as "already vested".
+- **Cliff:** `cliff_time` must satisfy `start_time ≤ cliff_time ≤ end_time`. Both boundary values are legal: `cliff_time == start_time` means no cliff, `cliff_time == end_time` means a single lump-sum payout at maturity.
+- **Deposit:** Must be positive (`deposit > 0`).
+- **Rate Floor:** `deposit ≥ duration_in_seconds`, ensuring the per-second rate does not truncate to zero. For example, a one-year stream requires at least 31,536,000 stroops (~3.16 USDC with 7 decimals).
+- **Overflow Guard:** `deposit × duration` must fit in `i128`. This check at creation proves all future accrual multiplications cannot overflow.
+- **Self-Stream:** `sender ≠ recipient`.
+- **Clock Skew:** No validation limit on past or future timestamps. Backdated streams (past `start_time`) vest immediately for the elapsed portion. Scheduled streams (future `start_time`) accrue nothing until the start instant. Streams extending beyond the network's `max_entry_ttl` are funded to the horizon at creation; the permissionless `extend_stream_ttl` keeper path covers the remainder.
 
 **Errors:**
 
 All validation errors are checked **before** the token transfer. A rejected creation consumes no stream id, increments no counter, pulls no deposit, and leaves no partial state.
 
-| error | condition |
-|---|---|
-| `SelfStream` (6) | `sender == recipient` |
-| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
-| `InvalidDeposit` (4) | `deposit ≤ 0` |
-| `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
-| `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |
-| `DepositRateTooLow` (5) | `deposit < (end_time - start_time)`, causing per-second rate to truncate to zero |
-| `Overflow` (22) | `deposit × (end_time - start_time)` does not fit in `i128` |
-| `StreamIdExhausted` (24) | The stream-id counter has reached `u64::MAX`; no further ids can be allocated. Terminal for new creations. |
-| `TokenTransferFailed` (25) | Token contract rejected the transfer (insufficient sender balance, authorization refused, or token's own rules). The token's internal error discriminant is intentionally discarded; see the root diagnostic in the transaction's `diagnosticEvents`. |
-| `TokenMissing` (26) | The `token` address has no deployed contract (host `Abort` / trap). |
+| error                         | condition                                                                                                                                                                                                                                             |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SelfStream` (6)              | `sender == recipient`                                                                                                                                                                                                                                 |
+| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters)                                                                                                                                                                                       |
+| `InvalidDeposit` (4)          | `deposit ≤ 0`                                                                                                                                                                                                                                         |
+| `InvalidTimeRange` (2)        | `end_time ≤ start_time` (zero or negative duration)                                                                                                                                                                                                   |
+| `InvalidCliff` (3)            | `cliff_time < start_time` or `cliff_time > end_time`                                                                                                                                                                                                  |
+| `DepositRateTooLow` (5)       | `deposit < (end_time - start_time)`, causing per-second rate to truncate to zero                                                                                                                                                                      |
+| `Overflow` (22)               | `deposit × (end_time - start_time)` does not fit in `i128`                                                                                                                                                                                            |
+| `StreamIdExhausted` (24)      | The stream-id counter has reached `u64::MAX`; no further ids can be allocated. Terminal for new creations.                                                                                                                                            |
+| `TokenTransferFailed` (25)    | Token contract rejected the transfer (insufficient sender balance, authorization refused, or token's own rules). The token's internal error discriminant is intentionally discarded; see the root diagnostic in the transaction's `diagnosticEvents`. |
+| `TokenMissing` (26)           | The `token` address has no deployed contract (host `Abort` / trap).                                                                                                                                                                                   |
 
 **Events:**
 
@@ -1223,12 +1247,12 @@ Creation is transactional. The stream-id counter and count are advanced only aft
 
 **Special Cases:**
 
-* **Backdated Start** (`start_time < now`): Legitimate for hire-date or grant-award vesting. The elapsed portion vests immediately and is withdrawable on the next ledger.
-* **Future Start** (`start_time > now`): Scheduled stream. The deposit is escrowed; accrual begins at `start_time`. Nothing vests or is withdrawable before then.
-* **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
-* **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
-* **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
-* **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly. Call `create_stream_with_cliff_mode` with `CliffMode::WallClock` to get a cliff that pausing cannot move.
+- **Backdated Start** (`start_time < now`): Legitimate for hire-date or grant-award vesting. The elapsed portion vests immediately and is withdrawable on the next ledger.
+- **Future Start** (`start_time > now`): Scheduled stream. The deposit is escrowed; accrual begins at `start_time`. Nothing vests or is withdrawable before then.
+- **Fully Elapsed Schedule** (`end_time ≤ now`): Accepted. Reads as fully vested immediately. The entry receives the minimum retention TTL floor.
+- **No Cliff** (`cliff_time == start_time`): Standard continuous vesting with no payout gate.
+- **Cliff at Maturity** (`cliff_time == end_time`): Single lump-sum payout when the stream completes.
+- **Pause Moves the Cliff** (`pausable == true`): the stored `cliff_time` is never rewritten, but pausing shifts the wall-clock instant at which the gate opens by the accumulated paused time. A recipient's first withdrawal becomes available at `cliff_time + paused_total`, not at `cliff_time` — see the `resume` entry point. An integrator rendering "funds unlock at &lt;time&gt;" must add the stream's current `paused_total` rather than displaying `cliff_time` directly. Call `create_stream_with_cliff_mode` with `CliffMode::WallClock` to get a cliff that pausing cannot move.
 
 **Example:** A 100-day stream of 1,000 USDC (7 decimals = 10,000,000 stroops per USDC) created with a 10-day cliff:
 
@@ -1254,6 +1278,7 @@ parameter, `cliff_mode`, inserted directly after `cliff_time`. It is the only wa
 to create a stream whose cliff a `pause` cannot move.
 
 **Signature:**
+
 ```rust
 fn create_stream_with_cliff_mode(
     env: Env,
@@ -1276,8 +1301,8 @@ fn create_stream_with_cliff_mode(
 **Parameters:** All of `create_stream`'s, with the same meanings, constraints and
 errors, plus:
 
-| parameter | type | description |
-|---|---|---|
+| parameter    | type        | description                                                                                                                                                                                                                                                                                                                                       |
+| ------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `cliff_mode` | `CliffMode` | How `cliff_time` is compared to the current time. Immutable after creation. `Schedule` (0) gates on the stream clock, so `paused_total` pushes the opening instant forward by exactly the accumulated paused time. `WallClock` (1) gates on the ledger timestamp, so the opening instant is `cliff_time` no matter how much the stream is paused. |
 
 **Errors:** Exactly `create_stream`'s — the mode is not a source of new
@@ -1286,16 +1311,16 @@ that is neither 0 nor 1 fails while the host is still decoding the arguments, as
 a conversion error that aborts the invocation; it is never a contract-level
 `Error`, and because the decode precedes all contract code it consumes no id,
 transfers nothing, and leaves no state. `cliff_time` range validation is
-unchanged and still applies in both modes: a mode changes *when* the gate is
-judged, not *which* `cliff_time` values are legal.
+unchanged and still applies in both modes: a mode changes _when_ the gate is
+judged, not _which_ `cliff_time` values are legal.
 
 **Relationship to `create_stream`:** `create_stream` is a thin wrapper that
 passes `CliffMode::Schedule`. It is not deprecated, and the two are byte-for-byte
 equivalent for `Schedule`; `create_stream` exists so a v1 caller and a v2 caller
 can create the same stream.
 
-**What the mode does not change.** The cliff remains a gate on *payout*, never on
-*accrual*, in both modes: before the gate opens, `withdrawable_of` is `0` even
+**What the mode does not change.** The cliff remains a gate on _payout_, never on
+_accrual_, in both modes: before the gate opens, `withdrawable_of` is `0` even
 though `vested_of` has been rising since `start_time`. And a `pause` still stops
 accrual in both modes. Choosing `WallClock` therefore removes the sender's
 ability to move the unlock instant; it does not let funds accrue while paused, so
@@ -1321,22 +1346,22 @@ produced.
 
 ### Views — read-only, no TTL side effects
 
-| function | returns | extends TTL | writes storage |
-|---|---|---|---|
-| `get_stream(stream_id)` | `Stream` | no | no |
-| `withdrawable_of(stream_id)` | `i128` | no | no |
-| `vested_of(stream_id)` | `i128` | no | no |
-| `refundable_of(stream_id)` | `i128` | no | no |
-| `stream_count()` | `u64` — ids run `0..stream_count()` | no | no |
-| `stream_exists(stream_id)` | `bool` | no | no |
-| `halted()` | `bool` | no | no |
-| `halt_operator()` | `Option<Address>` | no | no |
+| function                     | returns                             | extends TTL | writes storage |
+| ---------------------------- | ----------------------------------- | ----------- | -------------- |
+| `get_stream(stream_id)`      | `Stream`                            | no          | no             |
+| `withdrawable_of(stream_id)` | `i128`                              | no          | no             |
+| `vested_of(stream_id)`       | `i128`                              | no          | no             |
+| `refundable_of(stream_id)`   | `i128`                              | no          | no             |
+| `stream_count()`             | `u64` — ids run `0..stream_count()` | no          | no             |
+| `stream_exists(stream_id)`   | `bool`                              | no          | no             |
+| `halted()`                   | `bool`                              | no          | no             |
+| `halt_operator()`            | `Option<Address>`                   | no          | no             |
 
 > **⚠ RPC read-skew caveat — all view functions**
 >
 > Public Soroban RPC endpoints are load-balanced across nodes that may be at
 > different ledger heights at the same instant. Two consecutive view calls can
-> therefore observe different ledgers, and a derived figure that *combines* two
+> therefore observe different ledgers, and a derived figure that _combines_ two
 > calls (e.g. `vested_of + refundable_of`) may be arithmetically impossible
 > even when the on-chain contract is perfectly correct.
 >
@@ -1345,6 +1370,7 @@ produced.
 > call observed.
 >
 > **Recommended mitigation for integrators:**
+>
 > 1. **Prefer `get_stream`** (single call) over calling `withdrawable_of`,
 >    `vested_of`, and `refundable_of` separately. One call is one ledger by
 >    construction — there is nothing to pin.
@@ -1384,7 +1410,7 @@ withdrawable_of == max(0, vested_of - withdrawn) // what the recipient may claim
 Two behavioural facts are the point of this entry point and must not be
 assumed:
 
-* **Rounding is down.** Vested is computed as
+- **Rounding is down.** Vested is computed as
 
   ```
   vested = floor(deposited * elapsed / duration)     // integer division
@@ -1393,17 +1419,17 @@ assumed:
   truncating in the recipient's disfavour. The residue stays in the contract
   and returns to the sender when the stream settles, so the pool can never be
   short. A client must not round up, and must not assume `deposited /
-  duration` times `elapsed` is exact.
+duration` times `elapsed` is exact.
 
   The formula above is the `Linear` curve. On a `Step` or `FrontLoaded` stream
-  the released fraction is the curve's, but the *direction* is the same: every
+  the released fraction is the curve's, but the _direction_ is the same: every
   curve floors, so the residue still stays in the pool and returns to the sender
   at settlement. The residue can be up to a full grid step on `FrontLoaded`
   rather than one stroop, which is why a curve-aware client must read `curve`
   from `get_stream` rather than assuming the linear formula. See
   [`ReleaseCurve`](#releasecurve).
 
-* **Pre-cliff it is zero.** The cliff *gates* the payout, it does not delay
+- **Pre-cliff it is zero.** The cliff _gates_ the payout, it does not delay
   accrual: before `cliff_time` the result is exactly `0`, and at the cliff
   instant the recipient becomes entitled to everything accrued since
   `start_time` — not merely what accrues after the cliff. There is no partial
@@ -1425,8 +1451,8 @@ schedule onto its start instant). A cancelled stream reads the same way:
 
 **Parameters.**
 
-| parameter | type | valid range |
-|---|---|---|
+| parameter   | type  | valid range                                                                                                                                                                                                                                                                                    |
+| ----------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stream_id` | `u64` | any id ever issued, i.e. `id < stream_count()`. Ids are monotonic and never reused. Any `u64` is accepted syntactically; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound` — it does not signal "no such id" vs "archived" (see Client requirements). |
 
 **Authorization.** None — `vested_of` is a permissionless, read-only view. It
@@ -1435,19 +1461,19 @@ keeping a stream alive is `extend_stream_ttl`'s job.
 
 **Errors.**
 
-| variant | # | condition |
-|---|---|---|
-| `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued or the entry has been archived. |
-| `Overflow` | 22 | Defensive only: the checked `deposited * elapsed` product does not fit in `i128`. It is unreachable for any stream created through the contract — `create_stream` and `top_up` both guard `deposited * duration` fits in `i128`, and `elapsed <= duration` always holds. Listed only so an integrator is never surprised by it. |
+| variant          | #   | condition                                                                                                                                                                                                                                                                                                                       |
+| ---------------- | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StreamNotFound` | 1   | No readable entry for `stream_id`: the id was never issued or the entry has been archived.                                                                                                                                                                                                                                      |
+| `Overflow`       | 22  | Defensive only: the checked `deposited * elapsed` product does not fit in `i128`. It is unreachable for any stream created through the contract — `create_stream` and `top_up` both guard `deposited * duration` fits in `i128`, and `elapsed <= duration` always holds. Listed only so an integrator is never surprised by it. |
 
 **Events.** None. Views emit no events; `vested_of` only reads.
 
 ### Maintenance — permissionless
 
-| function | returns | extends TTL | writes storage |
-|---|---|---|---|
-| `extend_stream_ttl(stream_id)` | `u32` ledgers now funded | **yes** — the stream entry and the contract instance | TTL only; no entry data changes |
-| `batch_extend_ttl(stream_ids: Vec<u64>)` | `u32` entries extended | **yes** — each existing listed stream and the contract instance; unknown ids are skipped | TTL only; no entry data changes |
+| function                                 | returns                  | extends TTL                                                                              | writes storage                  |
+| ---------------------------------------- | ------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------- |
+| `extend_stream_ttl(stream_id)`           | `u32` ledgers now funded | **yes** — the stream entry and the contract instance                                     | TTL only; no entry data changes |
+| `batch_extend_ttl(stream_ids: Vec<u64>)` | `u32` entries extended   | **yes** — each existing listed stream and the contract instance; unknown ids are skipped | TTL only; no entry data changes |
 
 **Read-path TTL rule (#1686).** Every view reads through `storage::peek_stream`
 or a plain `has`/`get`, so a view never extends TTL and never writes: calling
@@ -1461,7 +1487,7 @@ table disagree — including if a view is switched to a TTL-bumping read.
 
 `MAX_BATCH_SIZE = 16` for both batch functions. Chunk client-side; the SDK does
 this automatically. See [README](../README.md) for why the cap is 16 and why it
-is derived from the *event* budget rather than the entry count.
+is derived from the _event_ budget rather than the entry count.
 
 #### `extend_stream_ttl(stream_id) -> u32`
 
@@ -1471,10 +1497,10 @@ stream, and the caller bears the rent cost.
 This is deliberate - a recipient's claim must never depend on the sender's
 continued goodwill, and a third-party keeper sweeping streams that approach
 expiry needs nobody's permission.
-The call cannot move funds or change stream state; the caller only ever *pays*.
+The call cannot move funds or change stream state; the caller only ever _pays_.
 
-| parameter | type | valid range |
-|---|---|---|
+| parameter   | type  | valid range                                                                                                                                                    |
+| ----------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `stream_id` | `u64` | an issued id whose entry still exists. Ids run `0..stream_count()`. Streams in **any** status are eligible, including terminal `Cancelled` and `Depleted` ones |
 
 **Returns** the `u32` number of ledgers the entry is now funded for.
@@ -1490,29 +1516,44 @@ transaction.
 
 **Errors**
 
-| error | condition |
-|---|---|
+| error                | condition                                                                        |
+| -------------------- | -------------------------------------------------------------------------------- |
 | `StreamNotFound` (1) | `stream_id` was never issued, or its entry has been archived and needs restoring |
 
 `StreamNotFound` is the only typed error this entry point returns.
 
 **Events** - on success emits `ttl_extended`: topics are the event name and
 `stream_id`; the payload is `extended_to_ledgers`, equal to the returned value.
+
 ### Delegation
 
 `grant_delegate` and `revoke_delegate` manage scoped, expiring permissions for a
-third party; the `delegate_*` entry points exercise a grant.
+third party; the `delegate_*` entry points exercise a grant. A stream stores at
+most **16 distinct delegate entries** (`MAX_DELEGATES_PER_STREAM`). The count
+tracks stored grants, not currently usable grants: an expired grant still uses a
+slot until it is revoked or replaced, because its persistent entry still incurs
+rent. Re-granting the same delegate replaces its grant without using another
+slot. At the cap, revocation frees one slot; a new delegate can then be added.
 
-| function | auth | returns |
-|---|---|---|
-| `grant_delegate(stream_id, grantor, delegate, ops, expires_at)` | sender or recipient, depending on `ops` | — |
-| `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
-| `delegate_withdraw(stream_id, delegate, amount: Option<i128>)` | delegate holding `op::WITHDRAW` | `i128` paid |
-| `delegate_cancel(stream_id, delegate)` | delegate holding `op::CANCEL` | — |
-| `delegate_pause(stream_id, delegate)` | delegate holding `op::PAUSE` | — |
-| `delegate_resume(stream_id, delegate)` | delegate holding `op::RESUME` | — |
-| `delegate_top_up(stream_id, delegate, amount)` | delegate holding `op::TOP_UP` | — |
-| `delegate_transfer_recipient(stream_id, delegate, new_recipient)` | delegate holding `op::TRANSFER_RECIPIENT` | — |
+The contract is immutable and has no in-place migration path. Existing
+deployments and their streams remain unchanged on their original contract; the
+cap applies to new deployments. If a future migration imports streams with
+more than 16 existing grant entries, those entries are grandfathered: existing
+grants may be replaced and revoked, but no additional distinct delegate may be
+added until the stored count falls below 16. Any migration must initialize the
+per-stream grant counter from the imported entries; the contract does not scan
+or infer grants from an incomplete counter.
+
+| function                                                          | auth                                      | returns     |
+| ----------------------------------------------------------------- | ----------------------------------------- | ----------- |
+| `grant_delegate(stream_id, grantor, delegate, ops, expires_at)`   | sender or recipient, depending on `ops`   | —           |
+| `revoke_delegate(stream_id, grantor, delegate)`                   | sender or recipient                       | —           |
+| `delegate_withdraw(stream_id, delegate, amount: Option<i128>)`    | delegate holding `op::WITHDRAW`           | `i128` paid |
+| `delegate_cancel(stream_id, delegate)`                            | delegate holding `op::CANCEL`             | —           |
+| `delegate_pause(stream_id, delegate)`                             | delegate holding `op::PAUSE`              | —           |
+| `delegate_resume(stream_id, delegate)`                            | delegate holding `op::RESUME`             | —           |
+| `delegate_top_up(stream_id, delegate, amount)`                    | delegate holding `op::TOP_UP`             | —           |
+| `delegate_transfer_recipient(stream_id, delegate, new_recipient)` | delegate holding `op::TRANSFER_RECIPIENT` | —           |
 
 A grant is stored under `(stream_id, delegate)` and covers one stream only. The
 delegate entry points verify it before acting: a missing grant or one that does
@@ -1548,13 +1589,13 @@ fn grant_delegate(
 
 **Parameters**
 
-| parameter | type | valid range | notes |
-|---|---|---|---|
-| `stream_id` | `u64` | must reference an existing, non-terminal stream | `StreamNotFound` (1) if no such stream; `StreamTerminated` (14) if the stream is `Cancelled` or `Depleted`. |
-| `grantor` | `Address` | `stream.sender` for sender-side ops, `stream.recipient` for recipient-side ops | The party the grant is issued by; `require_auth()` runs on it, so the call must be authorised by that address. |
-| `delegate` | `Address` | any account or contract address | The party that may later call the `delegate_*` entry points. Not authenticated at grant time. |
-| `ops` | `u32` | bitmask of the `op::*` constants: `WITHDRAW` `1`, `CANCEL` `2`, `PAUSE` `4`, `RESUME` `8`, `TOP_UP` `16`, `TRANSFER_RECIPIENT` `32` | Bits 0–5 are defined; higher bits are reserved and never match at authorisation time. OR several constants together for a multi-op grant. `ops == 0` is a no-op: it returns `Ok(())` and stores nothing. |
-| `expires_at` | `Option<u64>` | `None` = never expires; `Some(t)` = Unix seconds | The grant is valid while `ledger.timestamp() <= t`. A timestamp already in the past is accepted and produces an immediately-expired grant. |
+| parameter    | type          | valid range                                                                                                                         | notes                                                                                                                                                                                                    |
+| ------------ | ------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stream_id`  | `u64`         | must reference an existing, non-terminal stream                                                                                     | `StreamNotFound` (1) if no such stream; `StreamTerminated` (14) if the stream is `Cancelled` or `Depleted`.                                                                                              |
+| `grantor`    | `Address`     | `stream.sender` for sender-side ops, `stream.recipient` for recipient-side ops                                                      | The party the grant is issued by; `require_auth()` runs on it, so the call must be authorised by that address.                                                                                           |
+| `delegate`   | `Address`     | any account or contract address                                                                                                     | The party that may later call the `delegate_*` entry points. Not authenticated at grant time.                                                                                                            |
+| `ops`        | `u32`         | bitmask of the `op::*` constants: `WITHDRAW` `1`, `CANCEL` `2`, `PAUSE` `4`, `RESUME` `8`, `TOP_UP` `16`, `TRANSFER_RECIPIENT` `32` | Bits 0–5 are defined; higher bits are reserved and never match at authorisation time. OR several constants together for a multi-op grant. `ops == 0` is a no-op: it returns `Ok(())` and stores nothing. |
+| `expires_at` | `Option<u64>` | `None` = never expires; `Some(t)` = Unix seconds                                                                                    | The grant is valid while `ledger.timestamp() <= t`. A timestamp already in the past is accepted and produces an immediately-expired grant.                                                               |
 
 **Authorisation**
 
@@ -1567,11 +1608,11 @@ instead. `ops == 0` is a no-op and needs no authorisation.
 
 **Errors**
 
-| # | error | condition |
-|---|---|---|
-| 1 | `StreamNotFound` | No stream exists with `stream_id`. |
-| 14 | `StreamTerminated` | The stream is `Cancelled` or `Depleted`; terminal streams accept no new grants. |
-| 7 | `Unauthorized` | `ops` mixes sender-side and recipient-side bits, or `grantor` is not the party that owns the requested ops. |
+| #   | error              | condition                                                                                                   |
+| --- | ------------------ | ----------------------------------------------------------------------------------------------------------- |
+| 1   | `StreamNotFound`   | No stream exists with `stream_id`.                                                                          |
+| 14  | `StreamTerminated` | The stream is `Cancelled` or `Depleted`; terminal streams accept no new grants.                             |
+| 7   | `Unauthorized`     | `ops` mixes sender-side and recipient-side bits, or `grantor` is not the party that owns the requested ops. |
 
 A failed `require_auth()` is a host authorisation trap rather than a typed
 contract error, so it is not listed above.
@@ -1586,35 +1627,35 @@ On success — that is, whenever a non-empty `ops` mask is stored — emits
 
 The stream contract has no admin and no upgrade path. The **emergency halt** is
 the single, deliberately narrow exception (issue #1818): an operator can stop
-*settlement* across every stream while an exploit or a stuck integration is
+_settlement_ across every stream while an exploit or a stuck integration is
 handled, without gaining any power over funds.
 
-| function | auth | returns |
-|---|---|---|
-| `set_halt_operator(operator)` | the named `operator` | — |
-| `halt()` | the installed operator | — |
-| `resume_contract()` | the installed operator | — |
-| `halted()` | none | `bool` |
-| `halt_operator()` | none | `Option<Address>` |
+| function                      | auth                   | returns           |
+| ----------------------------- | ---------------------- | ----------------- |
+| `set_halt_operator(operator)` | the named `operator`   | —                 |
+| `halt()`                      | the installed operator | —                 |
+| `resume_contract()`           | the installed operator | —                 |
+| `halted()`                    | none                   | `bool`            |
+| `halt_operator()`             | none                   | `Option<Address>` |
 
 **Scope — what the halt does and does not do.**
 
-* It refuses **every state-changing entry point** with `ContractHalted` (34):
+- It refuses **every state-changing entry point** with `ContractHalted` (34):
   `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`,
   `resume`, `transfer_recipient`, `grant_delegate`, `revoke_delegate`, all six
   `delegate_*` variants, `extend_stream_ttl` and `batch_extend_ttl`. `set_halt_operator`,
   `halt` and `resume_contract` are the only mutations that still run, which is
   what makes the stop reversible.
-* **Reads are unaffected.** `get_stream`, `withdrawable_of`, `vested_of`,
+- **Reads are unaffected.** `get_stream`, `withdrawable_of`, `vested_of`,
   `refundable_of`, `stream_count`, `stream_exists`, `halted` and
   `halt_operator` answer normally for the whole duration. Integrators can keep
   observing balances and stream state during an incident.
-* It **settles nothing**. No funds move, no stream is cancelled or paused, and
+- It **settles nothing**. No funds move, no stream is cancelled or paused, and
   no schedule changes. Accrual is a pure function of ledger time, so streams
   keep vesting while halted — `withdrawable_of` continues to climb; what stops
   is the ability to act on it. Lifting the halt resumes from exactly the state
   that was halted.
-* It is **contract-wide**, not per-stream: `pause` remains the per-stream,
+- It is **contract-wide**, not per-stream: `pause` remains the per-stream,
   sender-authorised tool that also freezes accrual.
 
 **Operator lifecycle.**
@@ -1637,13 +1678,13 @@ reopen settlement while the incident may still be live.
 
 **Errors.**
 
-| # | error | condition |
-|---|---|---|
-| 34 | `ContractHalted` | Any state-changing entry point while halted. Checked before authorization and every other precondition. |
-| 35 | `HaltOperatorAlreadySet` | `set_halt_operator` after the operator was installed. |
-| 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` with no operator installed. |
-| 37 | `ContractAlreadyHalted` | `halt` while already halted. |
-| 38 | `ContractNotHalted` | `resume_contract` while not halted. |
+| #   | error                    | condition                                                                                               |
+| --- | ------------------------ | ------------------------------------------------------------------------------------------------------- |
+| 34  | `ContractHalted`         | Any state-changing entry point while halted. Checked before authorization and every other precondition. |
+| 35  | `HaltOperatorAlreadySet` | `set_halt_operator` after the operator was installed.                                                   |
+| 36  | `HaltOperatorNotSet`     | `halt`/`resume_contract` with no operator installed.                                                    |
+| 37  | `ContractAlreadyHalted`  | `halt` while already halted.                                                                            |
+| 38  | `ContractNotHalted`      | `resume_contract` while not halted.                                                                     |
 
 A failed `require_auth()` on `set_halt_operator`, `halt` or `resume_contract`
 is a host authorisation trap rather than a typed contract error, so it is not
@@ -1651,11 +1692,11 @@ listed above.
 
 **Events.**
 
-| event | topics after the name | payload |
-|---|---|---|
-| `halt_operator_set` | `operator` | — |
-| `contract_halted` | `operator` | `halted_at` |
-| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
+| event               | topics after the name | payload                    |
+| ------------------- | --------------------- | -------------------------- |
+| `halt_operator_set` | `operator`            | —                          |
+| `contract_halted`   | `operator`            | `halted_at`                |
+| `contract_resumed`  | `operator`            | `resumed_at`, `halted_for` |
 
 Each transition emits exactly one event, so an indexer can reconstruct the
 halted window from the event stream alone. `test::halt` drives the whole
@@ -1672,24 +1713,24 @@ is the snake_case event name; second is the routing key — always `stream_id`
 for stream-scoped events, and `operator` for the contract-level halt events,
 which are not about any one stream.
 
-| event | topics after the name | payload |
-|---|---|---|
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve` |
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable` |
-| `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference` |
-| `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
-| `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
-| `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |
-| `resumed` | `stream_id`, `sender` | `paused_duration`, `paused_total` |
-| `topped_up` | `stream_id`, `sender` | `amount`, `deposited`, `end_time` |
-| `recipient_transferred` | `stream_id`, `old_recipient`, `new_recipient` | — |
-| `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
-| `ttl_extended` | `stream_id` | `extended_to_ledgers` |
-| `delegate_granted` | `stream_id`, `grantor`, `delegate` | `ops`, `expires_at` |
-| `delegate_revoked` | `stream_id`, `grantor`, `delegate` | — |
-| `halt_operator_set` | `operator` | — |
-| `contract_halted` | `operator` | `halted_at` |
-| `contract_resumed` | `operator` | `resumed_at`, `halted_for` |
+| event                   | topics after the name                         | payload                                                                                                               |
+| ----------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `stream_created`        | `stream_id`, `sender`, `recipient`            | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `curve`      |
+| `stream_created`        | `stream_id`, `sender`, `recipient`            | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cliff_mode`, `cancellable`, `pausable`, `transferable` |
+| `stream_created`        | `stream_id`, `sender`, `recipient`            | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable`, `reference`  |
+| `withdrawn`             | `stream_id`, `recipient`                      | `amount`, `withdrawn`, `deposited`, `status`                                                                          |
+| `cancelled`             | `stream_id`, `sender`, `recipient`            | `refunded`, `vested`, `withdrawn`, `end_time`                                                                         |
+| `paused`                | `stream_id`, `sender`                         | `paused_at`, `paused_total`                                                                                           |
+| `resumed`               | `stream_id`, `sender`                         | `paused_duration`, `paused_total`                                                                                     |
+| `topped_up`             | `stream_id`, `sender`                         | `amount`, `deposited`, `end_time`                                                                                     |
+| `recipient_transferred` | `stream_id`, `old_recipient`, `new_recipient` | —                                                                                                                     |
+| `delegate_revoked`      | `stream_id`, `grantor`, `delegate`            | —                                                                                                                     |
+| `ttl_extended`          | `stream_id`                                   | `extended_to_ledgers`                                                                                                 |
+| `delegate_granted`      | `stream_id`, `grantor`, `delegate`            | `ops`, `expires_at`                                                                                                   |
+| `delegate_revoked`      | `stream_id`, `grantor`, `delegate`            | —                                                                                                                     |
+| `halt_operator_set`     | `operator`                                    | —                                                                                                                     |
+| `contract_halted`       | `operator`                                    | `halted_at`                                                                                                           |
+| `contract_resumed`      | `operator`                                    | `resumed_at`, `halted_for`                                                                                            |
 
 Every payload carries enough state to reconstruct the stream without replaying
 from genesis. Field order and topic placement are ABI.
@@ -1753,8 +1794,8 @@ rate_per_second = deposited / (end_time - start_time)      // integer, truncatin
 ```
 
 The reasoning, and the cost of being wrong, both matter here because the
-contract is immutable — *adding this view later is impossible without
-redeploying to a new address*.
+contract is immutable — _adding this view later is impossible without
+redeploying to a new address_.
 
 Against adding it: it carries zero information. `get_stream` already returns
 `deposited`, `start_time` and `end_time`, so a view would be pure convenience
@@ -1783,12 +1824,12 @@ having added the view.
 
 The SDK's implementation is normative and must define, at minimum:
 
-| case | value |
-|---|---|
-| active | `deposited / (end_time - start_time)`, truncating |
-| paused | the schedule rate is unchanged; the *instantaneous* rate is zero. The SDK must expose these as two distinct, named quantities rather than one ambiguous `rate`. |
-| cancelled | undefined — return `None`, not zero. A cancelled stream has no rate, and zero would be indistinguishable from a paused stream to a caller that ignores status. |
-| after `top_up` | unchanged by construction; `top_up` extends `end_time` instead of raising the rate |
+| case           | value                                                                                                                                                           |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| active         | `deposited / (end_time - start_time)`, truncating                                                                                                               |
+| paused         | the schedule rate is unchanged; the _instantaneous_ rate is zero. The SDK must expose these as two distinct, named quantities rather than one ambiguous `rate`. |
+| cancelled      | undefined — return `None`, not zero. A cancelled stream has no rate, and zero would be indistinguishable from a paused stream to a caller that ignores status.  |
+| after `top_up` | unchanged by construction; `top_up` extends `end_time` instead of raising the rate                                                                              |
 
 Link back to this table from the SDK's own documentation so the two cannot
 drift.
@@ -1825,4 +1866,3 @@ technical write-up, including measurement data and code examples.
 `id < stream_count()` means the entry has been archived, not that it never
 existed. Surface a restore action rather than an error. See
 [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) §1.
-

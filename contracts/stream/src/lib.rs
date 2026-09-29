@@ -107,7 +107,7 @@ pub use storage::{
 pub use types::op;
 pub use types::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
-    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+    Stream, StreamStatus, MAX_DELEGATES_PER_STREAM, MAX_REFERENCE_LENGTH,
 };
 
 use soroban_sdk::{
@@ -1602,6 +1602,7 @@ impl FluxoraStream {
     /// * Mixed grants must come from both parties; callers should split them.
     ///
     /// Granting over an existing grant replaces it entirely.
+    /// A stream may have at most [`MAX_DELEGATES_PER_STREAM`] distinct delegates.
     ///
     /// # Errors
     ///
@@ -1609,6 +1610,8 @@ impl FluxoraStream {
     /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
     /// * [`Error::Unauthorized`] — caller is not the required party for any of
     ///   the requested ops.
+    /// * [`Error::TooManyDelegates`] — this would add a distinct delegate
+    ///   beyond the per-stream maximum.
     pub fn grant_delegate(
         env: Env,
         stream_id: u64,
@@ -1651,7 +1654,7 @@ impl FluxoraStream {
         }
 
         let grant = DelegateGrant { ops, expires_at };
-        storage::save_delegate(&env, stream_id, &delegate, &grant);
+        storage::save_delegate(&env, stream_id, &delegate, &grant)?;
 
         events::delegate_granted(&env, stream_id, &grantor, &delegate, ops, expires_at);
         Ok(())
