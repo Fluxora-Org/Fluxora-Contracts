@@ -157,7 +157,7 @@ What a change to `contracts/stream` is expected to satisfy before review:
    related**, re-measure — don't adjust the number by feel. See §3.2 of
    `fluxora-build-spec.md` for how the batch cap was derived, and
    `contracts/stream/wasm-size-budget.env` for the size gate (currently
-   48,128 bytes baseline, 131,072 max).
+   75,159 bytes baseline, 131,072 max).
 6. **If you rename the package or the cdylib target**, update the canonical
    values in *both* `.github/workflows/ci.yml` (the `lint` and `packaging`
    jobs) and `contracts/stream/src/test/packaging.rs`

@@ -6,6 +6,7 @@
 
 use super::common::*;
 use crate::{Error, StreamStatus};
+use proptest::prelude::*;
 
 #[test]
 fn pausing_freezes_accrual() {
@@ -138,6 +139,97 @@ fn repeated_pause_cycles_accumulate_correctly() {
     h.warp_to(T0 + 100 * DAY + expected_paused);
     assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
     h.assert_pool_exact();
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::default())]
+
+    /// A pause immediately followed by a resume must be a no-op when the
+    /// ledger timestamp does not advance. Randomized preceding cycles ensure
+    /// the invariant also holds after the stream has already accumulated
+    /// paused time and accrued at different points in its schedule.
+    #[test]
+    fn zero_elapsed_pause_resume_preserves_stream_state(
+        seed in any::<u64>(),
+        operations in prop::collection::vec((0u8..4, 0u64..=3 * DAY), 0..=8),
+    ) {
+        let h = Harness::new();
+        let id = h.create_simple(1_000 * ONE, 365 * DAY);
+
+        for (kind, seconds) in operations {
+            match kind {
+                // Advance while remaining well inside the stream's schedule.
+                0 => h.advance(seconds),
+                // Exercise a normal pause/resume cycle before the zero-time
+                // assertion, so paused_total is not always zero.
+                1 => {
+                    h.client.pause(&id);
+                    h.advance(seconds);
+                    h.client.resume(&id);
+                }
+                // Include zero-time transitions at arbitrary points in the
+                // generated operation sequence as well as at its end.
+                2 => {
+                    let before = h.snapshot();
+                    let timestamp = h.now();
+                    h.client.pause(&id);
+                    h.client.resume(&id);
+                    prop_assert_eq!(
+                        h.now(),
+                        timestamp,
+                        "seed {}: pause/resume changed the ledger timestamp",
+                        seed,
+                    );
+                    prop_assert_eq!(
+                        h.snapshot(),
+                        before,
+                        "seed {}: zero-elapsed pause/resume changed stream state",
+                        seed,
+                    );
+                }
+                // A rejected second pause must preserve its original freeze
+                // point. This keeps the generated sequence sensitive to the
+                // pause-state guard while exercising the same lifecycle.
+                _ => {
+                    h.client.pause(&id);
+                    let freeze_point = h.get(id).paused_at;
+                    h.advance(seconds);
+                    prop_assert_eq!(
+                        h.client.try_pause(&id).unwrap_err().unwrap(),
+                        Error::StreamAlreadyPaused,
+                        "seed {}: a paused stream accepted a second pause",
+                        seed,
+                    );
+                    prop_assert_eq!(
+                        h.get(id).paused_at,
+                        freeze_point,
+                        "seed {}: rejected pause moved the freeze point",
+                        seed,
+                    );
+                    h.client.resume(&id);
+                }
+            }
+        }
+
+        // Force every generated case to exercise the behavior under test even
+        // when the random sequence contains no zero-time transition.
+        let before = h.snapshot();
+        let timestamp = h.now();
+        h.client.pause(&id);
+        h.client.resume(&id);
+        prop_assert_eq!(
+            h.now(),
+            timestamp,
+            "seed {}: pause/resume changed the ledger timestamp",
+            seed,
+        );
+        prop_assert_eq!(
+            h.snapshot(),
+            before,
+            "seed {}: zero-elapsed pause/resume changed stream state",
+            seed,
+        );
+    }
 }
 
 /// A pause that starts before the cliff and ends after it must not let the
@@ -862,5 +954,287 @@ fn state_machine_paused_for_full_lifetime_resumes_normally() {
     // Accrue normally from the frozen point.
     h.advance(50 * DAY);
     assert_eq!(h.client.vested_of(&id), 500 * ONE);
+    h.assert_pool_exact();
+}
+
+// --- Issue #1832 — resume exactly at end_time ----------------------------------
+
+/// Resuming at exactly the wall-clock `end_time` is the specific case where
+/// `paused_total` arithmetic could push `elapsed` past `duration` if the
+/// stream-clock formula is wrong.
+///
+/// Scenario: a 100-day stream paused at day 30 (300 tokens vested, 700 still
+/// locked). The pause holds until the wall clock reaches `end_time`. At that
+/// point, `paused_total = 70 days`, so:
+///
+/// ```text
+/// stream_time(end_time) = end_time - paused_total
+///                       = start + 100d - 70d
+///                       = start + 30d
+/// elapsed               = 30 days   (must not overflow to > duration)
+/// vested                = 300 ONE
+/// refundable            = 700 ONE   (conservation exact)
+/// ```
+///
+/// The stream is still `Active` after resume — it has 70 days of stream-time
+/// left to run. Only after another 70 days of wall-clock time does it reach
+/// full maturity.
+///
+/// Acceptance criteria (issue #1832):
+///
+/// * Scenario exercised end-to-end through the public ABI.
+/// * Funds conservation `vested + refundable == deposited` asserted at the
+///   resume instant.
+/// * `resumed` event carries the correct `paused_duration` and `paused_total`.
+/// * Final stream state (`Depleted`) verified after full withdrawal.
+/// * `assert_pool_exact` called at the end.
+/// * The test fails if the behaviour it pins is changed.
+#[test]
+fn resume_exactly_at_end_time_conservation_and_final_state() {
+    use crate::events::Resumed;
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::Event as _;
+
+    let h = Harness::new();
+    let duration = 100 * DAY;
+    let deposit = 1_000 * ONE;
+
+    // Create a 100-day pausable stream. start_time == T0.
+    let start = h.now();
+    let end = start + duration;
+    let id = h.create(deposit, start, end, start, true, true, true);
+
+    // Advance 30 days — 300 ONE vested, 700 ONE locked.
+    h.advance(30 * DAY);
+    assert_eq!(h.client.vested_of(&id), 300 * ONE);
+
+    // Pause here. Stream clock freezes at day 30.
+    h.client.pause(&id);
+    let pause_instant = h.now();
+    assert_eq!(pause_instant, start + 30 * DAY);
+    assert_eq!(h.get(id).paused_at, Some(pause_instant));
+
+    // Advance the wall clock to exactly the original end_time while paused.
+    // Accrual must not move — stream clock is frozen.
+    h.warp_to(end);
+    assert_eq!(h.now(), end, "wall clock must be exactly at end_time");
+    assert_eq!(
+        h.client.vested_of(&id),
+        300 * ONE,
+        "no accrual while paused even at original end_time"
+    );
+
+    // Resume at exactly end_time. This is the arithmetic boundary:
+    //   paused_duration = end_time - pause_instant = 70 days
+    //   paused_total    = 70 days (was 0 before)
+    //   stream_time     = end_time - paused_total = start + 30d (not beyond end_time)
+    //   elapsed         = 30 days  (not >= duration)
+    h.client.resume(&id);
+
+    // --- Event assertion ---------------------------------------------------
+    // Build the expected Resumed event from ground truth (post-call stream
+    // state) and compare byte-for-byte, matching the pattern in
+    // withdraw_events.rs / cancel_events.rs.
+    {
+        let s_after = h.get(id);
+        let expected_event = Resumed {
+            stream_id: id,
+            sender: h.sender.clone(),
+            // paused_duration = wall-clock delta from pause_instant to now
+            paused_duration: 70 * DAY,
+            // paused_total is the post-resume cumulative value stored in stream
+            paused_total: s_after.paused_total,
+        };
+
+        let published: std::vec::Vec<_> = h
+            .env
+            .events()
+            .all()
+            .filter_by_contract(&h.contract_id)
+            .events()
+            .to_vec();
+
+        assert_eq!(
+            published,
+            std::vec![expected_event.to_xdr(&h.env, &h.contract_id)],
+            "resume must emit exactly one Resumed event with the correct payload"
+        );
+
+        // Also verify the individual field against the expected value.
+        assert_eq!(
+            s_after.paused_total,
+            70 * DAY,
+            "paused_total must equal the 70-day pause duration"
+        );
+    }
+
+    // --- Post-resume stream state ------------------------------------------
+    let s = h.get(id);
+    assert_eq!(
+        s.status,
+        StreamStatus::Active,
+        "stream must be Active after resume"
+    );
+    assert_eq!(s.paused_at, None, "paused_at must be cleared");
+    assert_eq!(
+        s.paused_total,
+        70 * DAY,
+        "paused_total must absorb the 70-day pause"
+    );
+
+    // --- Conservation at the resume instant --------------------------------
+    // Invariant I4: vested + refundable == deposited, exactly.
+    let vested_now = h.client.vested_of(&id);
+    let refundable_now = h.client.refundable_of(&id);
+    assert_eq!(
+        vested_now,
+        300 * ONE,
+        "vested must equal the amount accrued before the pause"
+    );
+    assert_eq!(
+        refundable_now,
+        700 * ONE,
+        "refundable must be the remainder"
+    );
+    assert_eq!(
+        vested_now + refundable_now,
+        deposit,
+        "vested + refundable must equal deposited (conservation I4)"
+    );
+
+    // withdrawable == vested - withdrawn == 300 ONE (nothing withdrawn yet)
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        300 * ONE,
+        "withdrawable must equal vested at this point"
+    );
+
+    // --- Partial withdrawal while the stream still has time left -----------
+    // The stream is Active but the clock is at stream-day 30. Withdraw what
+    // is available now to prove the stream is not stuck in a terminal state.
+    let paid = h.client.withdraw(&id, &None);
+    assert_eq!(
+        paid,
+        300 * ONE,
+        "first withdrawal must be the pre-pause accrual"
+    );
+    assert_eq!(h.balance(&h.recipient), 300 * ONE);
+    assert_eq!(
+        h.get(id).status,
+        StreamStatus::Active,
+        "stream remains Active — 70 days of stream-time remain"
+    );
+    h.assert_pool_exact();
+
+    // --- Accrual resumes correctly after the resume call -------------------
+    // Advancing 35 more wall-clock days adds 35 days of stream time (no more
+    // pauses), so vested goes from 300 to 650 ONE.
+    h.advance(35 * DAY);
+    assert_eq!(
+        h.client.vested_of(&id),
+        650 * ONE,
+        "vested must advance at the original rate after resume"
+    );
+
+    // --- Stream fully matures at end_time + paused_total -------------------
+    // The stretched end is end_time + paused_total = start + 100d + 70d = start + 170d.
+    // Current wall clock: end_time + 35d = start + 135d.  35d remain.
+    h.advance(35 * DAY);
+    // Wall clock is now start + 170d.  Stream clock = 170d - 70d = 100d == duration.
+    assert_eq!(
+        h.client.vested_of(&id),
+        1_000 * ONE,
+        "stream must be fully vested at the stretched end time"
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        700 * ONE,
+        "withdrawable must be the remaining 700 ONE"
+    );
+    h.assert_pool_exact();
+
+    // --- Final withdrawal drains the stream to Depleted --------------------
+    let final_paid = h.client.withdraw(&id, &None);
+    assert_eq!(
+        final_paid,
+        700 * ONE,
+        "final withdrawal must collect the remaining deposit"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        1_000 * ONE,
+        "recipient must hold the full deposit"
+    );
+
+    let s_final = h.get(id);
+    assert_eq!(
+        s_final.status,
+        StreamStatus::Depleted,
+        "stream must become Depleted after the last withdrawal"
+    );
+    assert_eq!(s_final.withdrawn, deposit, "withdrawn must equal deposited");
+    assert_eq!(
+        s_final.paused_at,
+        None,
+        "no open pause on a terminal stream"
+    );
+
+    // Pool must be empty — every token has been paid to the recipient.
+    h.assert_pool_exact();
+}
+
+/// Sharper variant of the end_time resume: the stream is paused at
+/// `start_time` itself (zero stream-time elapsed) and the resume call lands
+/// exactly at `end_time`. This maximises `paused_total` to `duration`, so
+/// `stream_time(end_time) == start_time` and `elapsed == 0`.
+///
+/// Guards the saturating-subtraction boundary: `paused_total == duration`
+/// must yield `stream_time == start_time`, not an underflow or wrap.
+#[test]
+fn resume_at_end_time_with_full_duration_paused() {
+    let h = Harness::new();
+    let duration = 100 * DAY;
+    let deposit = 1_000 * ONE;
+
+    let start = h.now();
+    let end = start + duration;
+    let id = h.create(deposit, start, end, start, true, true, true);
+
+    // Pause immediately at creation — zero stream-time elapsed.
+    h.client.pause(&id);
+    assert_eq!(h.client.vested_of(&id), 0);
+    assert_eq!(h.get(id).paused_at, Some(start));
+
+    // Advance exactly to end_time.
+    h.warp_to(end);
+    assert_eq!(h.client.vested_of(&id), 0, "no accrual during full pause");
+
+    // Resume. paused_total = end_time - start = duration = 100 days.
+    // stream_time(end) = end - paused_total = start. elapsed = 0.
+    h.client.resume(&id);
+
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Active);
+    assert_eq!(s.paused_at, None);
+    assert_eq!(s.paused_total, duration);
+
+    // Conservation: vested(0) + refundable(deposited) == deposited.
+    assert_eq!(h.client.vested_of(&id), 0);
+    assert_eq!(h.client.refundable_of(&id), deposit);
+    assert_eq!(
+        h.client.vested_of(&id) + h.client.refundable_of(&id),
+        deposit,
+        "conservation must hold immediately after resume"
+    );
+
+    // The stream must run its full 100 days from the resumed point.
+    h.advance(duration);
+    assert_eq!(
+        h.client.vested_of(&id),
+        deposit,
+        "stream fully vests after the complete duration from the resume point"
+    );
+    assert_eq!(h.client.withdraw(&id, &None), deposit);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
     h.assert_pool_exact();
 }
