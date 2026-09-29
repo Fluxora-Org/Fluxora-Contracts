@@ -157,7 +157,7 @@ What a change to `contracts/stream` is expected to satisfy before review:
    related**, re-measure — don't adjust the number by feel. See §3.2 of
    `fluxora-build-spec.md` for how the batch cap was derived, and
    `contracts/stream/wasm-size-budget.env` for the size gate (currently
-   48,128 bytes baseline, 131,072 max).
+   75,159 bytes baseline, 131,072 max).
 6. **If you rename the package or the cdylib target**, update the canonical
    values in *both* `.github/workflows/ci.yml` (the `lint` and `packaging`
    jobs) and `contracts/stream/src/test/packaging.rs`
@@ -225,11 +225,12 @@ the failure output.
   failure or you've introduced a new one — don't assume today's `main` is
   fully green on these.
 - **The test-host's storage runs in recording mode**, so an expired
-  persistent entry is silently auto-restored during `cargo test`. This means
-  `test::ttl` proves the rent arithmetic but *not* the real-network recovery
-  flow — that's what `script/archival-canary.sh` and the archival probe are
-  for. Read `docs/KNOWN-LIMITATIONS.md` §1 before claiming TTL is "solved" by
-  a green suite.
+  persistent entry is silently auto-restored during `cargo test`. The live
+  network does the same, which the canary established on testnet on 2026-09-28,
+  so `test::ttl` is representative here — but read `docs/KNOWN-LIMITATIONS.md`
+  §1 before claiming TTL is "solved" by a green suite: what the suite does not
+  measure is what the automatic restoration *costs*, and that is what
+  `script/archival-canary.sh --round-trip` records.
 
 ## Before opening a PR
 
