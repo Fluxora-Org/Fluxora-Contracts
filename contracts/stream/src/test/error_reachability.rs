@@ -617,8 +617,10 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                  mutation those four paths can make — pause/resume keep elapsed \
                  time identical, `top_up` scales numerator and denominator \
                  together, and a recipient change does not enter the formula — \
-                 so 33 is unreachable. The guard stays because the invariant it \
-                 protects is load-bearing.",
+                 so 33 is unreachable. `test::vested_decreased` searches \
+                 randomized operation sequences against paused, cliffed and \
+                 near-maximum streams and confirms no trigger. The guard stays \
+                 because the invariant it protects is load-bearing.",
             ),
         ),
     }
