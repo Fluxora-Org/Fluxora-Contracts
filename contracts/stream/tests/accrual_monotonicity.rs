@@ -34,8 +34,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, Stream,
-    StreamStatus,
+    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, CliffMode,
+    Stream, StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
@@ -55,6 +55,7 @@ fn dummy_stream(env: &Env, deposited: i128, start: u64, end: u64, cliff: u64) ->
         start_time: start,
         end_time: end,
         cliff_time: cliff,
+        cliff_mode: CliffMode::Schedule,
         cancellable: true,
         pausable: true,
         transferable: true,

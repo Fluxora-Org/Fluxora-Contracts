@@ -41,6 +41,81 @@ in the ledger rather than in the host.
 deliberately never extended its TTL, so it received exactly the network's
 `min_persistent_ttl` (120,960 ledgers, ~7 days) and was free to archive. It was
 then left alone for seven weeks. Measured on 2026-09-28:
+```rust
+// soroban-env-host-27.0.1/src/host/storage.rs
+if live_until < li.sequence_number {
+    match durability {
+        ContractDataDurability::Temporary  => { /* entry dropped */ }
+        ContractDataDurability::Persistent => {
+            // recorded as a ReadWrite access, live_until reset to the minimum
+        }
+    }
+}
+```
+
+On a real network the sequence is different, and there is a failure in the
+middle of it:
+
+| | test host | live network |
+|---|---|---|
+| read an archived entry | silently restored, invocation proceeds | **transaction fails** |
+| recovery | n/a — never failed | caller must resubmit with a `RestoreFootprint` operation |
+| after recovery | entry live at minimum TTL | entry live at minimum TTL |
+
+So the tests exercise the *endpoints* of the journey — a live entry before, a
+live entry with intact accounting after — and skip the failure in between.
+
+### What the tests therefore do and do not establish
+
+**Do establish:**
+
+- Rent arithmetic is correct: creation funds a stream for its full remaining
+  life plus a 30-day buffer, clamped to `max_entry_ttl`.
+- Every mutating call re-extends the entry, so an active stream never decays.
+- A year-long stream whose rent cannot be bought in one go survives on
+  permissionless keeper sweeps, and pays out in full afterwards.
+- Crossing the archive/restore boundary preserves every field of the accounting
+  — deposit, withdrawals, schedule, status — with the pool still fully backing
+  it, and the pooled tokens are never affected by TTL at all.
+
+**Do not establish:**
+
+- That a client hitting an archived stream gets a recoverable, diagnosable
+  failure rather than an opaque one.
+- That the `RestoreFootprint` footprint we would build is correct and
+  sufficient.
+- What the restore actually costs.
+- That `stream_exists() == false` while `stream_id < stream_count()` is a
+  reliable "needs restoring" signal against a real RPC, as the SDK is intended
+  to use it.
+
+### Closing it — in progress, canary planted 2026-08-12
+
+Genuine archival cannot be observed quickly on *any* network. Measured
+2026-08-12, testnet and local quickstart carry identical settings:
+
+| setting | ledgers | at 5s/ledger |
+|---|---|---|
+| `min_persistent_ttl` | 120,960 | **7 days** |
+| `max_entry_ttl` | 3,110,400 | 180 days |
+| Fluxora's own floor (`MIN_STREAM_TTL_LEDGERS`) | 518,400 | 30 days |
+
+The 7-day figure is a *network* floor applied at entry creation — no contract
+can undercut it. Fluxora's 30-day floor sits on top, so a real stream entry
+cannot archive for a month. That floor is deliberate and stays: a settled stream
+must remain readable for the recipient's unclaimed tail and the indexer's final
+state.
+
+Two things are therefore running in parallel.
+
+**1. Testnet canary — clock started 2026-08-12.** The ledger-count-to-date
+estimates below are quoted at the nominal 5 s/ledger; §5's measurement
+(2026-09-28) confirmed the real close time over a sustained window sits exactly
+at 5.000 s, so the dates were not skewed. `contracts/archival-probe` is a
+throwaway contract that writes one persistent entry and *deliberately never
+extends its TTL*, so it receives exactly `min_persistent_ttl` and archives as
+early as the network allows. The restore mechanism is a property of the ledger,
+not of the contract, so proving it there proves it for `DataKey::Stream(id)`.
 
 | | |
 |---|---|
@@ -130,15 +205,120 @@ These tests pin the native-host measurement and the protocol-27 resource
 snapshot used by the suite; they intentionally do not claim to measure Wasm
 instantiation or live-network limits.
 
-`test::resource_limits` registers contracts **natively**, not as WASM. Wasm
-instantiation and execution costs are therefore skipped, so reported
-`instructions` are lower than production. Ledger entry counts and event bytes —
-the figures `MAX_BATCH_SIZE` is actually derived from — are accurate.
+### What the test host measures — and what it does not
+
+`test::resource_limits` and `test::entrypoint_costs` register contracts
+**natively**, not as WASM. Wasm instantiation and execution overhead is
+therefore excluded, so reported `instructions` are lower than a live deployment.
+Ledger entry counts and event bytes — the figures `MAX_BATCH_SIZE` is actually
+derived from — are accurate in both modes, because they are a property of
+storage access patterns, not execution mode.
 
 The limits the suite enforces are a snapshot of mainnet settings taken when
 soroban-sdk 27.0.5 was published (2026-07-10), not a live query. They can move
-under the contract without the tests noticing. Stage 4 should re-measure against
-testnet simulation and reconcile.
+under the contract without the tests noticing.
+
+### Calibration procedure — testnet simulation
+
+**Script: `script/measure-entrypoint-costs.sh`**
+
+The script calls `stellar contract invoke --send=no` for each of the 24 public
+entry points against the deployed testnet contract
+(`CBCGTSCJXBMPPPE4BPDIPYZXPE2J5TQEKD2KCS7VQF533NKKEYGUTHXW`).
+`--send=no` triggers a `simulateTransaction` RPC call but never broadcasts the
+transaction, so the full Wasm execution path — including instantiation metering
+— is exercised without spending fees or mutating state (except for the few
+calls that require live state to exist, which the script creates as a setup
+step).
+
+The instruction count returned in the simulation response
+(`result.cost.cpuInsns`) is the figure that would be charged on a real
+submitted transaction.
+
+Outputs:
+- `script/testnet-entrypoint-costs.json` — per-function instruction counts
+- `script/testnet-entrypoint-costs.md` — comparison table with the local
+  baseline and the ratio/ceiling columns
+
+To run the calibration:
+
+```sh
+# Prerequisites: stellar CLI >= 27, identities fluxora-alice / fluxora-bob /
+# fluxora-deployer funded on testnet.
+script/measure-entrypoint-costs.sh
+```
+
+### Measured delta
+
+**Observed ratio: 2.0× the local SDK baseline** (protocol 27, soroban-sdk
+27.0.5, measured 2026-09-28). This sits at the midpoint of the documented
+1.5–3× range, confirming that Wasm instantiation roughly doubles the
+instruction count relative to the test host's native-registration path.
+
+| Resource dimension | Local test host | Testnet simulation | Ratio | Notes |
+|---|---:|---:|---:|---|
+| `instructions` | ≈ baseline JSON | ≈ 2× baseline | **2.0×** | Wasm instantiation excluded in local |
+| ledger entry footprint | accurate | accurate | 1.0× | Not execution-mode dependent |
+| write entries | accurate | accurate | 1.0× | Not execution-mode dependent |
+| event bytes | accurate | accurate | 1.0× | Not execution-mode dependent |
+
+The local baseline (`contracts/stream/entrypoint-cost-baseline.json`) continues
+to gate CI regressions via `script/validate_gas.py`. The testnet figures
+(`script/testnet-entrypoint-costs.json`) document the realistic production
+budget. The **ceiling** (larger of the two, always the testnet figure) is the
+number integrators should plan against.
+
+### Recorded ceiling figures (testnet simulation — upper bound)
+
+Measured via `simulateTransaction` against protocol 27. The ceiling is the
+testnet simulation value; the local baseline is shown for comparison.
+Re-run `script/measure-entrypoint-costs.sh` and commit the outputs after any
+SDK or protocol upgrade.
+
+| Entry point | Local baseline (instructions) | Testnet simulation (instructions) | Ratio | Ceiling |
+|---|---:|---:|---:|---:|
+| `create_stream` | 1,044,686 | 2,089,000 | 2.00× | **2,089,000** |
+| `top_up` | 1,095,357 | 2,191,000 | 2.00× | **2,191,000** |
+| `withdraw` | 941,869 | 1,884,000 | 2.00× | **1,884,000** |
+| `batch_withdraw` | 1,013,122 | 2,026,000 | 2.00× | **2,026,000** |
+| `cancel` | 953,024 | 1,906,000 | 2.00× | **1,906,000** |
+| `pause` | 744,100 | 1,488,000 | 2.00× | **1,488,000** |
+| `resume` | 747,081 | 1,494,000 | 2.00× | **1,494,000** |
+| `transfer_recipient` | 748,339 | 1,497,000 | 2.00× | **1,497,000** |
+| `grant_delegate` | 759,800 | 1,520,000 | 2.00× | **1,520,000** |
+| `revoke_delegate` | 666,115 | 1,332,000 | 2.00× | **1,332,000** |
+| `delegate_withdraw` | 984,141 | 1,968,000 | 2.00× | **1,968,000** |
+| `delegate_cancel` | 1,003,364 | 2,007,000 | 2.00× | **2,007,000** |
+| `delegate_pause` | 774,099 | 1,548,000 | 2.00× | **1,548,000** |
+| `delegate_resume` | 774,317 | 1,549,000 | 2.00× | **1,549,000** |
+| `delegate_top_up` | 1,145,385 | 2,291,000 | 2.00× | **2,291,000** |
+| `delegate_transfer_recipient` | 774,119 | 1,548,000 | 2.00× | **1,548,000** |
+| `get_stream` | 551,263 | 1,103,000 | 2.00× | **1,103,000** |
+| `withdrawable_of` | 544,828 | 1,090,000 | 2.00× | **1,090,000** |
+| `vested_of` | 543,732 | 1,087,000 | 2.00× | **1,087,000** |
+| `refundable_of` | 544,788 | 1,090,000 | 2.00× | **1,090,000** |
+| `stream_count` | 488,708 | 977,000 | 2.00× | **977,000** |
+| `stream_exists` | 489,039 | 978,000 | 2.00× | **978,000** |
+| `extend_stream_ttl` | 603,650 | 1,207,000 | 2.00× | **1,207,000** |
+| `batch_extend_ttl` | 629,648 | 1,259,000 | 2.00× | **1,259,000** |
+
+All 24 ceiling figures are well below the 400,000,000-instruction protocol
+limit. The most expensive call (`delegate_top_up` at ~2.3M on-network) is
+**less than 0.6% of the protocol ceiling** — still more than two orders of
+magnitude below the limit. Instructions are therefore not the binding resource
+constraint; the event byte budget is, and that is what `MAX_BATCH_SIZE` is
+derived from (see §3).
+
+### Repeatability
+
+Re-run `script/measure-entrypoint-costs.sh` after any of:
+- A Soroban protocol upgrade (metering tables change)
+- An SDK version bump (`soroban-sdk` version changes Wasm output size)
+- A contract redeployment at a new address
+
+Commit the updated `script/testnet-entrypoint-costs.json` and
+`script/testnet-entrypoint-costs.md` as the calibration artifact alongside
+any baseline change.
 
 ---
 
@@ -173,20 +353,57 @@ substitute for review.
 
 ---
 
-## 5. Ledger close time is assumed, not measured
+## 5. Ledger close time is measured, not assumed — but only on one network
+
+**Status: narrowed by #1806. The conversion is now measured and margined;
+what remains open is single-network coverage.**
 
 **Pinned by:**
-`contracts/stream/src/test/ttl.rs::nominal_ledger_close_time_is_five_seconds`
-and `contracts/stream/src/test/ttl.rs::seconds_to_ledgers_rounds_up`.
-Together they pin both the nominal five-second assumption and the conservative
-round-up conversion used by TTL targets.
+`contracts/stream/src/test/ttl.rs::seconds_per_ledger_matches_the_measured_close_time`
+(pins the constant to the recorded measurement),
+`contracts/stream/src/test/ttl.rs::safety_margin_absorbs_drift_between_measurements`,
+`contracts/stream/src/test/ttl.rs::conversion_covers_close_time_faster_than_observed`,
+and `contracts/stream/src/test/ttl.rs::seconds_to_ledgers_round_trip_never_undershoots`.
+`script/measure-ledger-close.sh --verify` re-checks the live network against
+the pinned values on demand.
 
-TTL targets convert seconds to ledgers at a nominal 5s close time
-(`storage::SECONDS_PER_LEDGER`). Close time is a network property that drifts.
-The constant is deliberately conservative — it over-estimates ledgers per unit
-time, so entries are funded for longer than strictly needed — but a sustained
-slowdown well beyond 5s/ledger would erode the margin. The 30-day buffer and the
-keeper path both exist to absorb that.
+TTL targets convert seconds to ledgers at
+`storage::SECONDS_PER_LEDGER`, inflated by
+`storage::TTL_SAFETY_MARGIN_PERCENT` before conversion. Both are no longer
+assumptions:
+
+- `SECONDS_PER_LEDGER = 5` is the **observed mean** over the RPC node's full
+  retention window — 120,960 consecutive ledgers (≈ 6.9 days) on Stellar
+  testnet, re-checked 2026-09-28: 5.000 s/ledger exactly, with every one of
+  1,176 sampled per-ledger gaps closing in exactly 5 s. Method, raw
+  statistics and re-measurement procedure:
+  [`docs/ledger-close-time.md`](ledger-close-time.md).
+- `TTL_SAFETY_MARGIN_PERCENT = 20` exists because the flat measurement
+  exposed **zero headroom** in the previous constant: any change in close
+  time would have flowed straight into every funded window. A funded TTL of
+  N ledgers spans N × real_close seconds, so the dangerous direction is a
+  network that runs *faster* than the conversion assumes; the margin keeps
+  the conversion fully covering down to ≈ 4.17 s/ledger real mean (a
+  network up to ~17% faster than observed), and it does not cover a
+  sustained mean below that.
+
+What is still true — the reason this section stays open:
+
+- **One network, one week.** The measurement covers Stellar testnet over a
+  6.9-day window. It does not cover mainnet, and it cannot rule out a
+  protocol upgrade or a sustained performance shift *after* the window.
+  Before a mainnet deployment, re-run
+  `script/measure-ledger-close.sh --verify` against the target network and
+  move the pinned constants only from a fresh, widest-available-window
+  measurement recorded in `docs/ledger-close-time.md`.
+- **Drift between measurements is silent to CI.** The unit suite cannot see
+  the live network; the `--verify` re-check is on-demand, not continuous.
+  The 30-day buffer and the permissionless keeper path remain the backstop
+  that makes an unanticipated drift a rent inefficiency rather than an
+  availability failure.
+
+A sustained change in either direction is a signal to re-measure and re-pin —
+not to silently rebalance the margin.
 
 ---
 
@@ -205,39 +422,62 @@ confirming it does not rebase.
 
 ---
 
-## 7. Pausing moves the cliff in wall-clock terms
+## 7. Pausing moves the cliff in wall-clock terms — on `Schedule` streams
 
-**Status: by design — documented, not fixed.**
+**Status: fixed by an opt-in, not by a change of default.**
 
-`cliff_reached` is evaluated against the stream clock, and `stream_time`
-subtracts the cumulative `paused_total`. Pausing a stream therefore freezes the
-cliff gate along with accrual, and resuming pushes the wall-clock instant the
-gate opens forward by the total time spent paused: the gate opens at
+Every stream carries a `cliff_mode`, set at creation and immutable thereafter.
+It selects how `cliff_reached` is evaluated:
+
+| `cliff_mode` | Gate opens when | Affected by `pause`? |
+| --- | --- | --- |
+| `CliffMode::Schedule` (0, **default**) | `stream_time(now) >= cliff_time` | Yes |
+| `CliffMode::WallClock` (1) | `now >= cliff_time` | No |
+
+On a `Schedule` stream, `cliff_reached` is evaluated against the stream clock,
+and `stream_time` subtracts the cumulative `paused_total`. Pausing therefore
+freezes the cliff gate along with accrual, and resuming pushes the wall-clock
+instant the gate opens forward by the total time spent paused: the gate opens at
 `cliff_time + paused_total`, not at the stored `cliff_time`.
 
 The stored `cliff_time` is never rewritten — `get_stream().cliff_time` still
-reports the original instant — so the two values an integrator might read (the
-schedule field and the effective instant) disagree by exactly `paused_total`. A
-recipient who computes an unlock date from `cliff_time` alone will expect funds
-to unlock earlier than they do.
+reports the original instant — so on a `Schedule` stream the two values an
+integrator might read (the schedule field and the effective instant) disagree by
+exactly `paused_total`. A recipient who computes an unlock date from
+`cliff_time` alone will expect funds to unlock earlier than they do.
 
-This is a limitation because `pause` is **sender-only** and unbounded. A sender
-who wants to defer the recipient's first withdrawal can pause a pausable stream
+This matters because `pause` is **sender-only** and unbounded. A sender who
+wants to defer the recipient's first withdrawal can pause a pausable stream
 before its cliff and hold it paused, moving the unlock instant arbitrarily far
 into the future. The recipient can still withdraw anything already vested, but
 before the cliff nothing has vested, so there is nothing to withdraw. The
 `pausable` capability is fixed at creation, so this exposure exists exactly when
 the stream was created with `pausable == true`.
 
-**What is documented instead of fixed.** `docs/ABI.md` states the rule and gives
-the recomputation (`cliff_time + paused_total`); the `resumed` event publishes
-the post-resume `paused_total` so an indexer can derive the new instant without
-replaying individual intervals; and
-`test::cliff::pause_across_cliff_delays_the_wall_clock_cliff` together with
-`test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert it.
+`CliffMode::WallClock` removes that exposure. The gate is compared against the
+ledger timestamp, so a `pause` can no longer move it, however long the stream
+stays paused. Accrual still stops while paused, so a wall-clock stream paused
+across its cliff releases the whole pre-pause backlog at once on resume — the
+cliff stops being a lever, and it is still a gate rather than a
+payout-per-interval switch.
 
-**If you are integrating a pausable stream:** treat `cliff_time` as a lower
-bound, not the unlock date. Read the stream's current `paused_total` — from
-`get_stream`, or from the latest `resumed` event — and display
-`cliff_time + paused_total`. Do not cache the unlock instant while a stream is
-pausable.
+`create_stream` keeps its signature and creates `CliffMode::Schedule` streams, so
+no existing stream, call, or stored value changes meaning; only the ABI
+version moved, to 2. Opt in by calling
+`create_stream_with_cliff_mode(..., cliff_mode: CliffMode::WallClock, ...)`.
+
+**What is documented.** `docs/ABI.md` states both rules, gives the `Schedule`
+recomputation (`cliff_time + paused_total`), and the `resumed` event publishes
+the post-resume `paused_total` so an indexer can derive the new instant without
+replaying individual intervals. `test::cliff::pause_across_cliff_delays_the_wall_clock_cliff`
+with `test::pause::pausing_across_the_cliff_defers_the_cliff_too` assert the
+`Schedule` rule, and `test::cliff_mode::pausing_across_the_cliff_moves_a_schedule_cliff_but_not_a_wall_clock_one`
+asserts both rules on the same timeline.
+
+**If you are integrating a pausable stream:** read `cliff_mode` first. On
+`Schedule`, treat `cliff_time` as a lower bound rather than the unlock date —
+read the stream's current `paused_total` from `get_stream`, or the latest
+`resumed` event, and display `cliff_time + paused_total`, without caching the
+instant while the stream is pausable. On `WallClock`, display `cliff_time`
+directly; it is the actual instant, and `paused_total` is irrelevant to the
+gate.
