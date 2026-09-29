@@ -11,11 +11,13 @@ Last verified: 2026-08-29 (PR #1665)
 
 | Entrypoint | Description |
 |---|---|
-| `create_stream` | Create a new payment stream with deposit, schedule, and capability flags |
+| `create_stream` | Create a new payment stream with deposit, schedule, and capability flags (`cliff_mode` is `Schedule`) |
+| `create_stream_with_cliff_mode` | Same as `create_stream`, plus an explicit `cliff_mode` choosing whether the cliff gate is read on the stream clock or the wall clock |
 | `top_up` | Extend stream duration at a fixed rate (sender auth) |
 | `withdraw` | Pull accrued balance; `None` = withdraw max |
 | `batch_withdraw` | Atomic multi-stream withdrawal |
 | `cancel` | Cancel stream, refund unvested to sender (sender auth, `cancellable`) |
+| `batch_cancel` | Atomic multi-stream cancellation; a non-cancellable member refuses the batch and is reported by its index in the submitted vector |
 | `pause` | Freeze accrual (sender auth, `pausable`) |
 | `resume` | Unfreeze accrual (sender auth, `pausable`) |
 | `transfer_recipient` | Change stream recipient (recipient auth, `transferable`) |
