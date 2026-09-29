@@ -83,25 +83,28 @@ use soroban_sdk::{
 /// full batch against protocol 27's mainnet limits, and the constraint that
 /// binds is not the one you would expect:
 ///
-/// Measured evidence from the release resource suite (20-stream batch):
+/// Measured evidence from the resource suite at the cap (16-stream batch):
 ///
-/// | limit | used by a 20-stream batch | ceiling |
+/// | limit | used by a 16-stream batch | ceiling |
 /// |---|---|---|
-/// | total footprint (entries) | 51 | 400 |
-/// | write entries | 24 | 200 |
-/// | instructions | ~5.8M | 400M |
-/// | **contract event bytes** | **10,240** | **16,384** |
+/// | total footprint (entries) | 43 | 400 |
+/// | write entries | 20 | 200 |
+/// | instructions | ~4.9M | 400M |
+/// | **contract event bytes** | **9,984** | **16,384** |
 ///
 /// Entry counts would allow well over a hundred streams per call. The *event
-/// budget* allows about 32, because each stream emits a `withdrawn` event plus
-/// the token contract's own `transfer` event — roughly 512 bytes per stream
-/// between them.
+/// budget* allows about 26, because each stream emits a `withdrawn` event plus
+/// the token contract's own `transfer` event — 624 bytes per stream between
+/// them, and issue #1868's `sender` and pause bookkeeping on `withdrawn` are
+/// what took that from 512.
 ///
-/// Sixteen is that measured ceiling with a 2x safety factor. The margin is not
-/// decoration: the per-stream event cost depends on the *token's* event
-/// payload, and a token heavier than the Stellar Asset Contract used in the
-/// tests would inflate it. A cap that merely fits today would fail on somebody
-/// else's token.
+/// Sixteen is that measured ceiling leaving 6,400 bytes of the event budget
+/// spare. The margin is not decoration: the per-stream event cost depends on the
+/// *token's* event payload, and a token heavier than the Stellar Asset Contract
+/// used in the tests would inflate it. A cap that merely fits today would fail
+/// on somebody else's token. The margin was the full 2x (8,192 bytes) before
+/// #1868, and the cap is frozen ABI, so the payload cost is what the margin
+/// absorbed rather than the cap moving.
 ///
 /// Larger requests are rejected with [`Error::BatchTooLarge`] rather than
 /// failing opaquely at the network level. The SDK chunks client-side, so the
@@ -847,7 +850,13 @@ impl FluxoraStream {
 
         storage::save_stream(&env, stream_id, &stream);
 
-        events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+        events::recipient_transferred(
+            &env,
+            stream_id,
+            &stream.sender,
+            &old_recipient,
+            &new_recipient,
+        );
         Ok(())
     }
 
@@ -1217,7 +1226,13 @@ impl FluxoraStream {
         stream.recipient = new_recipient.clone();
         storage::save_stream(&env, stream_id, &stream);
 
-        events::recipient_transferred(&env, stream_id, &old_recipient, &new_recipient);
+        events::recipient_transferred(
+            &env,
+            stream_id,
+            &stream.sender,
+            &old_recipient,
+            &new_recipient,
+        );
         Ok(())
     }
 

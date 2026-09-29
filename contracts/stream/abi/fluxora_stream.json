@@ -304,7 +304,9 @@
         {"name": "refunded", "type": "i128"},
         {"name": "vested", "type": "i128"},
         {"name": "withdrawn", "type": "i128"},
-        {"name": "end_time", "type": "u64"}
+        {"name": "end_time", "type": "u64"},
+        {"name": "paused_at", "type": "Option<u64>"},
+        {"name": "paused_total", "type": "u64"}
       ]
     },
     {
@@ -315,7 +317,8 @@
       ],
       "data": [
         {"name": "paused_at", "type": "u64"},
-        {"name": "paused_total", "type": "u64"}
+        {"name": "paused_total", "type": "u64"},
+        {"name": "recipient", "type": "Address"}
       ]
     },
     {
@@ -326,6 +329,7 @@
         {"name": "new_recipient", "type": "Address"}
       ],
       "data": [
+        {"name": "sender", "type": "Address"}
       ]
     },
     {
@@ -336,7 +340,8 @@
       ],
       "data": [
         {"name": "paused_duration", "type": "u64"},
-        {"name": "paused_total", "type": "u64"}
+        {"name": "paused_total", "type": "u64"},
+        {"name": "recipient", "type": "Address"}
       ]
     },
     {
@@ -366,7 +371,8 @@
       "data": [
         {"name": "amount", "type": "i128"},
         {"name": "deposited", "type": "i128"},
-        {"name": "end_time", "type": "u64"}
+        {"name": "end_time", "type": "u64"},
+        {"name": "recipient", "type": "Address"}
       ]
     },
     {
@@ -388,7 +394,10 @@
         {"name": "amount", "type": "i128"},
         {"name": "withdrawn", "type": "i128"},
         {"name": "deposited", "type": "i128"},
-        {"name": "status", "type": "StreamStatus"}
+        {"name": "status", "type": "StreamStatus"},
+        {"name": "sender", "type": "Address"},
+        {"name": "paused_at", "type": "Option<u64>"},
+        {"name": "paused_total", "type": "u64"}
       ]
     }
   ]

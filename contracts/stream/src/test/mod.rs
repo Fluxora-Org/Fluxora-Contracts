@@ -82,3 +82,8 @@ mod read_ttl_matrix;
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
 mod packaging;
+
+// Issue #1868 — replaying the event stream alone must reconstruct every
+// stream's state, so an indexer with no on-chain per-party index can answer
+// "which streams are mine" and keep its mirror of `get_stream` correct.
+mod event_reconstruction;

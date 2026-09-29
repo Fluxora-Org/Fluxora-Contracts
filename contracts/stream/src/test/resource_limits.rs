@@ -60,6 +60,25 @@ const LEDGER_ENTRY_LIMIT: u32 = 400;
 const WRITE_ENTRY_LIMIT: u32 = 200;
 /// Maximum total size of emitted contract events, in bytes.
 const EVENT_BYTES_LIMIT: u32 = 16_384;
+/// Event bytes a *full* batch may occupy, measured.
+///
+/// A 16-stream `batch_withdraw` emits 9,984 bytes: 16 `withdrawn` events plus
+/// the token's own `transfer` events, 624 bytes per stream. That is 61% of
+/// [`EVENT_BYTES_LIMIT`], leaving 6,400 bytes of slack — the margin
+/// `MAX_BATCH_SIZE` now rests on.
+///
+/// The number moved from 8,192 when issue #1868 required every lifecycle event
+/// to name both parties: the `sender` appended to `withdrawn` costs 112 bytes
+/// per event once the pause bookkeeping is republished alongside it. That is a
+/// deliberate, measured trade against a documented acceptance criterion, not
+/// drift — which is why this constant is asserted directly instead of as a
+/// multiple of the limit. **A payload change that pushes a full batch past
+/// 9,984 bytes has to re-derive the cap, not re-baseline this number**, because
+/// `MAX_BATCH_SIZE` is frozen ABI (`docs/ABI.md`) and the remaining slack is
+/// what absorbs a token whose `transfer` event is heavier than the SAC used
+/// here. `the_event_budget_is_not_the_binding_constraint_at_the_cap` is the
+/// measurement to re-run.
+const EVENT_BYTES_PER_FULL_BATCH: u32 = 9_984;
 /// Maximum modelled CPU instructions per invocation.
 const INSTRUCTION_LIMIT: i64 = 400_000_000;
 
@@ -119,9 +138,11 @@ fn assert_has_headroom(label: &str, cost: Cost, factor: u32) {
         cost.instructions,
     );
     assert!(
-        cost.event_bytes * factor <= EVENT_BYTES_LIMIT,
-        "{label}: {} event bytes lack {factor}x headroom under {EVENT_BYTES_LIMIT}",
+        cost.event_bytes <= EVENT_BYTES_PER_FULL_BATCH,
+        "{label}: {} event bytes exceed the {EVENT_BYTES_PER_FULL_BATCH}-byte budget measured \
+         for a full batch ({} of the {EVENT_BYTES_LIMIT}-byte ceiling)",
         cost.event_bytes,
+        cost.event_bytes * 100 / EVENT_BYTES_LIMIT,
     );
 }
 

@@ -83,10 +83,11 @@ trial calls.
 
 The binding mainnet constraint is the **contract event budget** (16,384 bytes per
 transaction), not entry or instruction counts. Each stream in a batch emits a
-`withdrawn` event plus the token's `transfer` event — roughly 512 bytes per
-stream between them. With a heavier token event payload, 32 streams would risk
-exhausting the budget. **Sixteen is the measured ceiling with a 2x safety
-factor.** The measurement suite lives in `test::resource_limits` and runs in
+`withdrawn` event plus the token's `transfer` event — 624 bytes per stream
+between them since issue #1868 appended the sender and the pause bookkeeping to
+`withdrawn`. With a heavier token event payload, 26 streams would risk
+exhausting the budget. **Sixteen is the measured ceiling leaving 6,400 bytes
+spare.** The measurement suite lives in `test::resource_limits` and runs in
 every CI build under the `Resource report` step.
 
 Client-side chunking is transparent to integrators: each chunk is a separate,

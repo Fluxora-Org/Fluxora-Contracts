@@ -207,9 +207,11 @@ per-stream event cost is the *token's* `transfer` event, not Fluxora's
 `withdrawn` event. Measured against the Stellar Asset Contract. A SEP-41 token
 with a heavier event payload shifts the ceiling down.
 
-The 2x safety factor exists for this reason, but it is a margin, not a proof. An
-integrator standardising on an unusual token should re-run
-`cargo test resource_limits -- --nocapture` against it.
+The margin left for a heavier token is 6,400 bytes of the event budget (a
+16-stream batch measures 9,984 of 16,384 since issue #1868 appended the sender
+and pause bookkeeping to `withdrawn`). It was the full 2x factor until then,
+and it is a margin, not a proof. An integrator standardising on an unusual token
+should re-run `cargo test resource_limits -- --nocapture` against it.
 
 ---
 
