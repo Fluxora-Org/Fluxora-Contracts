@@ -1,8 +1,11 @@
 [package]
-name = "fluxora-factory"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+name = "fluxora_factory"
+description = "Admin policy wrapper and stream factory for Fluxora on Soroban"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+publish = false
 
 [lib]
 crate-type = ["lib", "cdylib"]
