@@ -406,3 +406,212 @@ fn rejected_operations_leave_vested_untouched() {
     h.assert_invariants();
     h.assert_pool_exact();
 }
+
+// ---------------------------------------------------------------------------
+// Randomized operation sequences (proptest)
+// ---------------------------------------------------------------------------
+//
+// The hand-written tests above enumerate every *ordering* of a fixed op set,
+// which is exhaustive over a small space but blind to sequences the author
+// didn't think to write down — repeated top-ups at awkward amounts, pause /
+// resume cycles interspersed with withdrawals, cancel arriving mid-sequence
+// rather than at a fixed position, and so on.
+//
+// This property generates arbitrary sequences of the same operations and
+// applies them to a primed stream through the real contract, asserting I3
+// after every step. Failures shrink to a minimal op sequence and are written
+// to `contracts/stream/proptest-regressions/` with the seed needed to
+// reproduce them.
+
+#[cfg(test)]
+mod proptest_sequences {
+    use super::*;
+    use proptest::collection::vec;
+    use proptest::prelude::*;
+
+    fn any_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            Just(Op::Withdraw),
+            Just(Op::TopUp),
+            Just(Op::Pause),
+            Just(Op::Resume),
+            Just(Op::Cancel),
+            Just(Op::TransferRecipient),
+            Just(Op::ExtendTtl),
+            Just(Op::BatchWithdraw),
+            Just(Op::BatchExtendTtl),
+        ]
+    }
+
+    proptest! {
+        // Respect PROPTEST_CASES from the environment; do not pin a case
+        // count here or CI's nightly deep sweep (512) would be overridden.
+        #![proptest_config(ProptestConfig::default())]
+
+        /// **I3 under randomized sequences.** A random sequence of mutating
+        /// operations is applied to a primed stream; vested must never
+        /// decrease at any step, with the clock frozen across each call.
+        #[test]
+        fn prop_random_operation_sequences_never_move_vested_backwards(
+            ops in vec(any_op(), 1..=24),
+        ) {
+            let h = Harness::new();
+            let id = primed_stream(&h);
+
+            let mut trace = std::string::String::new();
+            for op in &ops {
+                trace.push_str(op.name());
+                trace.push(' ');
+                apply_and_check(&h, id, *op, &trace);
+            }
+        }
+
+        /// The same property, but with time advancing between operations.
+        /// Each individual measurement is still frozen; the stream simply
+        /// arrives at each call in a different temporal state, so sequences
+        /// land on many points of the schedule rather than one.
+        #[test]
+        fn prop_random_operation_sequences_with_time_between_calls(
+            ops in vec(any_op(), 1..=16),
+            gaps in vec(0u64..=120, 1..=16),
+        ) {
+            let h = Harness::new();
+            let id = primed_stream(&h);
+
+            let mut trace = std::string::String::new();
+            for (i, op) in ops.iter().enumerate() {
+                if let Some(gap) = gaps.get(i) {
+                    if *gap > 0 {
+                        h.advance(*gap);
+                    }
+                }
+                trace.push_str(op.name());
+                trace.push(' ');
+                apply_and_check(&h, id, *op, &trace);
+            }
+        }
+
+        /// Schedules with awkward, coprime durations and deposits — the shape
+        /// that produced the original 93-stroop top_up regression.
+        ///
+        /// `deposit` is **derived** from `duration` rather than drawn
+        /// independently, so the generator can never produce a schedule the
+        /// contract rejects (`deposit >= duration` is the rate floor enforced
+        /// by `create_stream`). Drawing both independently made the property
+        /// fail on its own generator with `DepositRateTooLow` (error #5)
+        /// before it ever reached the monotonicity check.
+        ///
+        /// `slack` is added on top of `duration`, so the per-second rate
+        /// truncates and the top_up rounding path is still exercised.
+        #[test]
+        fn prop_awkward_schedules_never_move_vested_backwards(
+            duration in 97u64..9_997u64,
+            slack in 0i128..10_000i128,
+            elapsed_frac in 1u64..100,
+            ops in vec(any_op(), 1..=12),
+        ) {
+            // Legal by construction: deposit >= duration.
+            let deposit = duration as i128 + slack;
+
+            let h = Harness::new();
+            let start = h.now();
+            let elapsed = duration * elapsed_frac / 100;
+
+            let id = h.create(
+                deposit,
+                start,
+                start + duration,
+                start,
+                true,
+                true,
+                true,
+            );
+            h.advance(elapsed);
+            let _ = h.client.try_withdraw(&id, &None);
+
+            let mut trace = std::string::String::new();
+            for op in &ops {
+                trace.push_str(op.name());
+                trace.push(' ');
+                apply_and_check(&h, id, *op, &trace);
+            }
+        }
+
+        /// **Awkward top-up amounts.** `Op::TopUp` uses a fixed
+        /// `10 * ONE`, which is too round to exercise the ceiling-vs-floor
+        /// rounding path in `top_up`. This property draws small, arbitrary
+        /// amounts — the shape that produced the original 93-stroop
+        /// regression — and applies them one at a time to a partially drawn
+        /// stream.
+        #[test]
+        fn prop_awkward_top_up_amounts_never_move_vested_backwards(
+            duration in 97u64..9_997u64,
+            slack in 1i128..10_000i128,
+            elapsed_frac in 1u64..100,
+            amounts in vec(1i128..10_000i128, 1..=8),
+        ) {
+            // Legal by construction: deposit >= duration.
+            let deposit = duration as i128 + slack;
+
+            let h = Harness::new();
+            let start = h.now();
+            let elapsed = duration * elapsed_frac / 100;
+
+            let id = h.create(
+                deposit,
+                start,
+                start + duration,
+                start,
+                true,
+                true,
+                true,
+            );
+            h.advance(elapsed);
+            let _ = h.client.try_withdraw(&id, &None);
+
+            for amount in &amounts {
+                let before = h.vested_snapshot();
+                let _ = h.client.try_top_up(&id, &amount);
+                h.assert_no_vested_regression(
+                    &before,
+                    &std::format!("top_up({amount})"),
+                );
+                h.assert_invariants();
+            }
+        }
+    }
+
+    /// **Fixed-seed validation.** Replays the property with an explicit seed
+    /// so the exact sequence is reproducible without relying on proptest's
+    /// regression file. Used by the validation step in the PR: remove the
+    /// floor-rounding guard in `top_up` and this test (and the properties
+    /// above) must fail.
+    #[test]
+    fn fixed_seed_sequence_is_deterministic() {
+        use proptest::test_runner::{Config, TestRng, TestRunner};
+
+        let config = Config {
+            cases: 64,
+            ..Config::default()
+        };
+        let mut runner = TestRunner::new_with_rng(
+            config,
+            TestRng::from_seed(proptest::test_runner::RngAlgorithm::ChaCha, &[0u8; 32]),
+        );
+
+        let strategy = vec(any_op(), 1..=24);
+        runner
+            .run(&strategy, |ops| {
+                let h = Harness::new();
+                let id = primed_stream(&h);
+                let mut trace = std::string::String::new();
+                for op in &ops {
+                    trace.push_str(op.name());
+                    trace.push(' ');
+                    apply_and_check(&h, id, *op, &trace);
+                }
+                Ok(())
+            })
+            .expect("fixed seed 0 must hold while the guard is present");
+    }
+}
