@@ -15,6 +15,28 @@ use soroban_sdk::contracterror;
 /// only mutated after all validation and the token transfer succeed. If any
 /// phase fails, no ID is consumed and no count is incremented; stream IDs are
 /// therefore contiguous with no gaps.
+///
+/// ## Terminal stream statuses
+/// A stream reaches a terminal status when no further accrual or state change
+/// is possible. Two distinct terminal statuses exist, and callers must be able
+/// to tell them apart because they mean different things for retry logic:
+///
+/// - [`Error::StreamTerminated`] (discriminant 14) — the stream ended *early*.
+///   It is reached when the sender `cancel`s the stream (`Cancelled`) or when
+///   the recipient withdraws the exact withdrawable balance and the stream
+///   becomes `Depleted`. Both are permanent: the stream can never accrue or be
+///   resumed again.
+/// - [`Error::StreamMatured`] (discriminant 15) — the stream ended *naturally*.
+///   It is reached when the accrual clock has passed `end_time` and the full
+///   deposit has vested. This is also permanent, but it signals successful
+///   completion rather than an early stop.
+///
+/// Both terminal statuses are permanent, so a caller retrying a mutating
+/// operation must not retry blindly: it should branch on which variant was
+/// returned to distinguish an early stop from a natural completion.
+///
+/// [`StreamStatus::is_terminal`] covers exactly these two statuses
+/// (discriminants 14 and 15) and nothing else.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -59,14 +81,24 @@ pub enum Error {
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
     StreamAlreadyPaused = 13,
-    /// Action attempted on a `Cancelled` or `Depleted` stream.
+    /// Action attempted on a stream that ended early: a `Cancelled` stream, or
+    /// a `Depleted` stream (the recipient withdrew the exact withdrawable
+    /// balance).
     ///
-    /// A stream is `Depleted` when the recipient withdraws the exact
-    /// withdrawable balance; subsequent withdrawals return this error.
+    /// This is a *terminal* status: the stream can never accrue or be resumed
+    /// again, so the error is permanent. It is distinguishable from
+    /// [`Self::StreamMatured`], which signals natural completion rather than an
+    /// early stop. Callers retrying a mutating operation must branch on which
+    /// of the two terminal variants was returned.
     StreamTerminated = 14,
-    /// `top_up` on a stream whose accrual clock has already reached `end_time`,
+    /// `top_up` on a stream whose accrual clock has already reached `end_time`.
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
+    ///
+    /// This is a *terminal* status: the stream completed naturally and the
+    /// full deposit has vested. Like [`Self::StreamTerminated`] it is
+    /// permanent, but it signals successful completion rather than an early
+    /// stop, so callers must be able to tell the two apart.
     StreamMatured = 15,
 
     // --- Withdrawal ---
@@ -175,63 +207,3 @@ pub enum Error {
     /// rebasing token).
     TokenAmountMismatch = 32,
     // --- Monotonicity ---
-    /// An operation would cause the vested amount to decrease.
-    ///
-    /// A defensive guard on `pause`, `resume`, `top_up` and
-    /// `transfer_recipient`. `vested` is non-decreasing under every mutation
-    /// those four paths can make — pause/resume leave elapsed time unchanged,
-    /// `top_up` scales numerator and denominator together, and the recipient
-    /// is not an input to the formula — so no reachable call produces it.
-    /// The guard stays because the invariant it protects is load-bearing.
-    /// Classified as reserved in `test::error_reachability`.
-    VestedDecreased = 33,
-
-    // --- Rebase detection ---
-    /// The pool's real token balance is short of the balance Fluxora has
-    /// accounted for.
-    ///
-    /// Fluxora keeps a per-token running total of the balance it expects to
-    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
-    /// payout and refund debits it — and reconciles that total against the
-    /// token's own `balance` at the end of every operation that moves pool
-    /// funds. A shortfall means the token changed balances outside a
-    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
-    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
-    /// invocation reverts instead of letting one recipient be paid out of
-    /// another's claim.
-    ///
-    /// A **surplus** is deliberately tolerated, never reported: a positive
-    /// rebase cannot cause an underpayment, and rejecting one would let any
-    /// third party freeze every withdrawal by dusting the contract with a
-    /// single unit. See `docs/ABI.md` "Token assumptions" and
-    /// `test::rebase_drift`.
-    PoolBalanceDrift = 39,
-    // --- Contract-level emergency halt (#1818) ---
-    /// A state-changing entry point was called while the contract-level halt
-    /// is engaged.
-    ///
-    /// Only mutations are refused: every read method (`get_stream`,
-    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
-    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
-    /// integrators can still observe the chain during an incident.
-    ContractHalted = 34,
-    /// `set_halt_operator` was called after an operator was already installed.
-    ///
-    /// The setter is deliberately one-shot: there is no rotation entry point,
-    /// so a compromised operator cannot be replaced — it can only be halted by
-    /// deploying a new contract.
-    HaltOperatorAlreadySet = 35,
-    /// `halt` or `resume_contract` was called on a contract that has never had
-    /// a halt operator installed.
-    ///
-    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
-    /// has no operator and no way to engage it.
-    HaltOperatorNotSet = 36,
-    /// `halt` was called while the contract was already halted.
-    ContractAlreadyHalted = 37,
-    /// `resume_contract` was called while the contract was not halted.
-    ///
-    /// There is no timeout on the halt, so this is the only way a resume can
-    /// be a no-op.
-    ContractNotHalted = 38,
-}
