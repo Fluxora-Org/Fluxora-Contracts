@@ -13,13 +13,18 @@ subscription billing, vesting schedules. The contract is the product.
 | Protocol | 27 (live on testnet and mainnet) |
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
-| Token interface | SEP-41 (USDC on Stellar has **7 decimals**) |
+| Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
 | Contract size | ~47 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
 > **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
 > A green suite here does not mean TTL is solved — the archival *recovery* flow
 > is not yet proven against a live network. See §1 there, and the summary below.
+
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
 
 ---
 
@@ -50,6 +55,11 @@ script/release.sh      # -> target/wasm32v1-none/release/fluxora_stream.wasm (on
 > wired into `cargo test`, but it is deliberately excluded from release artifacts.
 > Never deploy it to mainnet. See
 > [`contracts/archival-probe/src/lib.rs`](contracts/archival-probe/src/lib.rs).
+
+**The full sequence — every script, the `deploy_target` input, who may trigger a
+mainnet deploy, and rollback — is in
+[docs/RELEASE.md](docs/RELEASE.md).** Follow that document end to end; the
+sections above are only the short version.
 
 ---
 
@@ -91,15 +101,21 @@ answer "show me my streams" without the contract paying rent to remember.
 `test::resource_limits::cost_is_independent_of_how_many_streams_exist` states
 this as a test: the 153rd stream costs exactly what the 2nd did.
 
-### Immutable guarantees
+### Deliberately immutable
+
+The deployed stream contract is **not upgradeable in place**. It has no admin
+key and exposes no upgrade entry point; changing the implementation requires a
+new deployment at a new address. This is a deliberate trust property, not a
+missing operational procedure: a recipient's stream guarantees cannot later be
+changed by an administrator. See the [ABI reference](docs/ABI.md#upgrade-posture).
 
 `cancellable`, `pausable` and `transferable` are fixed at creation and can never
 change. Before accepting a stream a recipient can verify that the sender cannot
 claw it back, freeze it, or reassign it. A stream that could *become* cancellable
 later would be worthless as a guarantee.
 
-For the same reason there is no admin key, no upgrade path, no fee switch and no
-global pause. Immutability is what lets another protocol depend on this one.
+For the same reason there is no fee switch and no global pause. Immutability is
+what lets another protocol depend on this one.
 
 ---
 
@@ -282,8 +298,11 @@ job of `extend_stream_ttl`.
 ### Retention policy by state
 
 Every touch tops the entry back up to one target — the stream's remaining
-effective life plus the 30-day buffer, floored at `MIN_STREAM_TTL_LEDGERS`
-(~30 days) and clamped to the network's `max_entry_ttl`. The threshold equals
+effective life plus the 30-day buffer, inflated by a 20% close-time safety
+margin, floored at `MIN_STREAM_TTL_LEDGERS` (~30 days plus the margin) and
+clamped to the network's `max_entry_ttl`. The close time the conversion
+assumes is measured, not assumed, with the margin covering drift
+([`KNOWN-LIMITATIONS.md` §5](docs/KNOWN-LIMITATIONS.md)). The threshold equals
 the extend-to, so an entry below its target is topped back up to it in full —
 and one already funded past the target keeps its higher balance: rent is never
 clawed back, so a stream entering a terminal state decays toward its floor
@@ -407,7 +426,9 @@ Its entire purpose is to prove the live-network archival/restore round trip that
 the unit suite structurally cannot (see [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md)
 and [`script/archival-canary.sh`](script/archival-canary.sh)). It writes a
 persistent entry and deliberately never extends its TTL, so it archives on the
-network's minimum schedule.
+network's minimum schedule. For the expected cadence, command prerequisites,
+signal interpretation, and operator response, see the
+[archival canary runbook](docs/archival-canary.md).
 
 It remains a **workspace member** — so `cargo test --workspace`, `cargo fmt --all`
 and `cargo clippy --all-targets` keep covering its smoke test — but it is
@@ -455,11 +476,16 @@ frontend's four contract calls all break, the backend is unaffected.
 | | |
 |---|---|
 | [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
+| [docs/archival-canary.md](docs/archival-canary.md) | Archival canary cadence, signal interpretation, and operator response. |
 | [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
 | [docs/provenance.md](docs/provenance.md) | Wasm provenance schema, design decisions, and the release gate. |
-| [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
+| [docs/RELEASE.md](docs/RELEASE.md) | **Release runbook.** Script roles, workflow inputs, deploy authorisation, rollback. |
+| [docs/terminal-operations.md](docs/terminal-operations.md) | Terminal (`Cancelled`/`Depleted`) behaviour and the rejection matrix. |
+| [docs/cliff-test-scenarios.md](docs/cliff-test-scenarios.md) | Cliff boundary test scenarios and expected values. |
+| [docs/factory-admin-rotation-tests.md](docs/factory-admin-rotation-tests.md) | Same-ledger admin rotation coverage for the factory. |
+| [docs/archive/](docs/archive/README.md) | Point-in-time reports and the original build spec, kept for provenance. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a

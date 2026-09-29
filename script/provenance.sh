@@ -24,18 +24,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="${FLUXORA_WASM_TARGET:-wasm32v1-none}"
 RELEASE_DIR="${2:-$ROOT/target/$TARGET/release}"
-TOOL_DIR="$ROOT/tools/provenance"
-TOOL="$TOOL_DIR/target/release/fluxora-provenance"
+# `fluxora-provenance` is a workspace member, so its host binary is produced in
+# the workspace target dir (not a crate-local one) by a normal workspace build.
+TOOL="$ROOT/target/release/fluxora-provenance"
 
+# Build just the tool package from the workspace root. The product crates build
+# for wasm32v1-none (a no_std target) while this tool needs std/host, so wasm
+# workspace builds must exclude it; the tool itself builds for the host.
 build_tool() {
-  (cd "$TOOL_DIR" && cargo build --release --quiet)
+  (cd "$ROOT" && cargo build --release --quiet -p fluxora-provenance)
 }
 
 cmd="${1:-help}"
 case "$cmd" in
   build)
     build_tool
-    cargo build --workspace --target "$TARGET" --release
+    (cd "$ROOT" && cargo build --workspace --exclude fluxora-provenance --target "$TARGET" --release)
     "$TOOL" generate "$RELEASE_DIR" --target "$TARGET"
     "$TOOL" verify "$RELEASE_DIR" --target "$TARGET"
     echo "provenance ok — $RELEASE_DIR/provenance.json is current"
@@ -49,7 +53,7 @@ case "$cmd" in
     "$TOOL" verify "$RELEASE_DIR" --target "$TARGET"
     ;;
   test)
-    (cd "$TOOL_DIR" && cargo test)
+    (cd "$ROOT" && cargo test -p fluxora-provenance)
     ;;
   help|-h|--help)
     sed -n '2,20p' "${BASH_SOURCE[0]}"

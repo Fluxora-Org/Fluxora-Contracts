@@ -9,12 +9,16 @@ use crate::{storage, DataKey, Error, StreamStatus};
 /// Seed the stream-id counter directly, as if `u64::MAX - 1` ids had already
 /// been handed out. Tests use this to exercise the exhaustion boundary without
 /// creating billions of streams.
-fn seed_counter(h: &Harness, value: u64) {
+pub(super) fn seed_counter(h: &Harness, value: u64) {
     h.env.as_contract(&h.contract_id, || {
         h.env
             .storage()
             .instance()
             .set(&DataKey::NextStreamId, &value);
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::StreamCount, &value);
     });
 }
 
@@ -325,29 +329,41 @@ fn rejects_cliff_outside_the_schedule() {
 fn rejects_deposit_below_one_stroop_per_second() {
     let h = Harness::new();
     let start = h.now();
-    let end = start + YEAR;
-    let duration = YEAR as i128;
 
-    let err = h
-        .client
-        .try_create_stream(
-            &h.sender,
-            &h.recipient,
-            &h.token,
-            &(duration - 1),
-            &start,
-            &end,
-            &start,
-            &true,
-            &true,
-            &true,
-        )
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::DepositRateTooLow);
+    // Test for several durations: 1 second, 1 hour, 1 year, 4 years
+    let durations = [1, 3600, YEAR, 4 * YEAR];
 
-    // Exactly one stroop per second is the boundary, and it is allowed.
-    h.create(duration, start, end, start, true, true, true);
+    for duration_u64 in durations {
+        let end = start + duration_u64;
+        let duration = duration_u64 as i128;
+
+        // Just below the threshold
+        if duration > 1 {
+            let err = h
+                .client
+                .try_create_stream(
+                    &h.sender,
+                    &h.recipient,
+                    &h.token,
+                    &(duration - 1),
+                    &start,
+                    &end,
+                    &start,
+                    &true,
+                    &true,
+                    &true,
+                )
+                .unwrap_err()
+                .unwrap();
+            assert_eq!(err, Error::DepositRateTooLow);
+        }
+
+        // Exactly at the threshold (1 unit per second)
+        h.create(duration, start, end, start, true, true, true);
+
+        // Just above the threshold
+        h.create(duration + 1, start, end, start, true, true, true);
+    }
 }
 
 /// A year-long USDC stream needs only ~3.16 USDC to clear the rate floor, so
@@ -592,6 +608,7 @@ fn streams_of_different_tokens_are_accounted_separately() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     assert_eq!(h.pool(), 100 * ONE, "first token pool");

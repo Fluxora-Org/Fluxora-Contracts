@@ -201,13 +201,19 @@ impl<'a> Harness<'a> {
 
     /// Advance the ledger clock by `seconds`.
     ///
-    /// Also advances the sequence number at the nominal ledger close rate, so
-    /// that time-based tests exercise TTL decay realistically rather than
-    /// freezing the sequence while the clock runs.
+    /// Also advances the sequence number at the network's *nominal* close
+    /// cadence, so that time-based tests exercise TTL decay realistically
+    /// rather than freezing the sequence while the clock runs. The nominal
+    /// rate is deliberate: this simulates the network the contract runs on,
+    /// while [`storage::seconds_to_ledgers`] carries the funding margin on
+    /// the contract side. Deriving cadence from the margined conversion would
+    /// hide the very gap the margin exists to cover.
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
         self.env.ledger().set_timestamp(info.timestamp + seconds);
-        let ledgers = storage::seconds_to_ledgers(seconds);
+        let ledgers = seconds
+            .saturating_add(storage::SECONDS_PER_LEDGER - 1)
+            .saturating_div(storage::SECONDS_PER_LEDGER);
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));
@@ -272,6 +278,7 @@ impl<'a> Harness<'a> {
             &true,
             &true,
             &true,
+            &None,
         )
     }
 
@@ -298,6 +305,54 @@ impl<'a> Harness<'a> {
             &cancellable,
             &pausable,
             &transferable,
+            &None,
+        )
+    }
+
+    /// Create with reference support - simple case
+    pub fn create_simple_with_ref(&self, deposit: i128, duration: u64, reference: Option<soroban_sdk::String>) -> u64 {
+        let start = self.now();
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &(start + duration),
+            &start,
+            &true,
+            &true,
+            &true,
+            &reference,
+        )
+    }
+
+    /// Create with reference support - full control
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_ref(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+        reference: Option<soroban_sdk::String>,
+    ) -> u64 {
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cancellable,
+            &pausable,
+            &transferable,
+            &reference,
+        )
         )
     }
 
@@ -404,17 +459,20 @@ impl<'a> Harness<'a> {
     /// Call this after every operation. It is the single most important
     /// assertion in the suite.
     pub fn assert_pool_invariant(&self) {
+        self.assert_pool_invariant_for(&self.token);
+    }
+
+    /// [`assert_pool_invariant`](Self::assert_pool_invariant) against a token
+    /// other than the harness's own.
+    ///
+    /// Tests that need a second asset — a dedicated supply, a different
+    /// issuer, a hostile token — still must assert the pool invariant on it,
+    /// but the harness-shaped check above is hard-wired to [`Harness::token`].
+    /// This is the same check with the token made explicit.
+    pub fn assert_pool_invariant_for(&self, token: &Address) {
         self.assert_invariants();
-        let mut total: i128 = 0;
-        let count = self.client.stream_count();
-        for id in 0..count {
-            let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
-                continue;
-            }
-            total += accrual::liability(&stream).expect("liability must not overflow");
-        }
-        let pool = self.pool();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
         assert!(
             pool >= total,
             "pool invariant violated: pooled balance {pool} < outstanding liability {total}",
@@ -428,21 +486,45 @@ impl<'a> Harness<'a> {
     /// true for every test that does not deliberately donate loose tokens to the
     /// contract.
     pub fn assert_pool_exact(&self) {
+        self.assert_pool_exact_for(&self.token);
+    }
+
+    /// [`assert_pool_exact`](Self::assert_pool_exact) against a token other
+    /// than the harness's own. See
+    /// [`assert_pool_invariant_for`](Self::assert_pool_invariant_for).
+    pub fn assert_pool_exact_for(&self, token: &Address) {
         self.assert_invariants();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
+        assert_eq!(
+            pool, total,
+            "pooled balance and outstanding liability diverged",
+        );
+    }
+
+    /// Sum of `deposited - withdrawn` across every stream denominated in
+    /// `token` (see [`accrual::liability`]).
+    fn outstanding_liability(&self, token: &Address) -> i128 {
         let mut total: i128 = 0;
         let count = self.client.stream_count();
         for id in 0..count {
             let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
+            if stream.token != *token {
                 continue;
             }
             total += accrual::liability(&stream).expect("liability must not overflow");
         }
-        assert_eq!(
-            self.pool(),
-            total,
-            "pooled balance and outstanding liability diverged",
-        );
+        total
+    }
+
+    // -----------------------------------------------------------------------
+    // Counter / population consistency (#1699)
+    // -----------------------------------------------------------------------
+
+    /// See [`assert_stream_count_consistent`]. The harness-shaped wrapper, so
+    /// the check reads like its siblings (`assert_pool_exact`, …).
+    pub fn assert_stream_count_consistent(&self) {
+        assert_stream_count_consistent(&self.env, &self.contract_id);
     }
 
     // -----------------------------------------------------------------------
@@ -525,4 +607,61 @@ impl<'a> Harness<'a> {
     pub fn dump_snapshot(&self) {
         std::eprintln!("{}", self.snapshot());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1699 — counter / population consistency
+// ---------------------------------------------------------------------------
+
+/// **`stream_count()` must equal the number of streams that actually exist.**
+///
+/// The contract keeps two representations of the same fact: the instance-level
+/// id counter behind [`crate::FluxoraStream::stream_count`] and the population
+/// of `DataKey::Stream(id)` records in persistent storage. This asserts they
+/// still agree, which is what the following invariants jointly guarantee:
+///
+/// * ids are handed out from the counter, contiguously, and never reused, so a
+///   successful create adds exactly one record at exactly the next id;
+/// * no entry point ever *removes* a stream record — a terminal operation
+///   rewrites it in place — so the population only grows;
+/// * a failing invocation rolls back **every** write it made, counter bumps
+///   included, so a create (or a terminal operation) that fails partway
+///   cannot leave the two halves of a write behind.
+///
+/// # How the probe works
+///
+/// Ids are contiguous, so the population is exactly `0..stream_count()`. The
+/// check counts the records that exist over the **inclusive** range
+/// `0..=stream_count()` — inclusive so that the *next* id out of the counter is
+/// probed too — and requires that count to come back as `stream_count()`:
+///
+/// * counter **too high**: some id below the counter has no record, so the
+///   population counts short and the assertion fails;
+/// * counter **too low**: the record sitting at (and above) the counter still
+///   exists, so the population counts long and the assertion fails.
+///
+/// One count therefore detects a wrong counter in either direction, and a
+/// deleted record (a hole) as well.
+///
+/// # When the two legitimately disagree — do not call it here
+///
+/// On a real network an entry whose TTL has run out archives and reports
+/// `stream_exists() == false` while its id is still below the counter: that is
+/// the documented "needs restoring" state, not a divergence
+/// (`docs/KNOWN-LIMITATIONS.md`). The SDK test host auto-restores on read, so
+/// time alone cannot produce this state in tests — only an explicit
+/// `persistent().remove(...)` can. Likewise, the `test::create` exhaustion
+/// fixtures seed the counter at `u64::MAX`, which would make the probe below
+/// iterate for ~2^64 ids; do not call this while the counter is seeded high.
+pub fn assert_stream_count_consistent(env: &Env, contract_id: &Address) {
+    let client = FluxoraStreamClient::new(env, contract_id);
+    let count = client.stream_count();
+
+    let existing = (0..=count).filter(|&id| client.stream_exists(&id)).count() as u64;
+
+    assert_eq!(
+        existing, count,
+        "stream_count() reports {count} streams but only {existing} stream \
+         records exist (ids 0..={count} probed) — counter and population diverged",
+    );
 }

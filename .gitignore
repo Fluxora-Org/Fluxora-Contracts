@@ -24,3 +24,8 @@ target_local/debug/
 target_local/release/
 target_local/*.d
 test_snapshots/
+
+# Captured local build / run output — never commit; publish as CI artifacts instead
+batch_test_output.txt
+script/testnet-exercise.log
+*.log

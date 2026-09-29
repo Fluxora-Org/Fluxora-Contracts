@@ -43,7 +43,6 @@ Last verified: 2026-08-29 (PR #1665)
 | `refundable_of` | Return refundable amount |
 | `stream_count` | Return total stream count |
 | `stream_exists` | Check if a stream ID exists |
-| `get_cliff_status` | Return cliff close-time skew status |
 
 ### Maintenance (permissionless)
 

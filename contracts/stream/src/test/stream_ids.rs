@@ -142,6 +142,30 @@ fn many_streams_get_unique_strictly_increasing_ids() {
     }
 }
 
+#[test]
+fn terminated_stream_ids_are_never_reissued() {
+    let h = Harness::new();
+
+    let cancelled_id = h.create_simple(10 * ONE, 10 * DAY);
+    assert_eq!(cancelled_id, 0);
+    h.client.cancel(&cancelled_id);
+    assert_eq!(h.get(cancelled_id).status, crate::StreamStatus::Cancelled);
+
+    let next_after_cancel = h.create_simple(10 * ONE, DAY);
+    assert_eq!(next_after_cancel, 1);
+
+    h.warp_to(T0 + DAY);
+    h.client.withdraw(&next_after_cancel, &None);
+    assert_eq!(
+        h.get(next_after_cancel).status,
+        crate::StreamStatus::Depleted
+    );
+
+    let next_after_depletion = h.create_simple(10 * ONE, DAY);
+    assert_eq!(next_after_depletion, 2);
+    assert_eq!(h.client.stream_count(), 3);
+}
+
 // ---------------------------------------------------------------------------
 // Failed creates must not consume or reuse an id
 // ---------------------------------------------------------------------------

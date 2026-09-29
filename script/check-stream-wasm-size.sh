@@ -53,9 +53,14 @@ delta=$((size - BASELINE_BYTES))
 echo "fluxora_stream.wasm: ${size} bytes"
 echo "baseline_delta_bytes: ${delta}"
 
-if [ "$size" -gt "$MAX_BYTES" ]; then
-  echo "WASM size ${size} exceeds budget ${MAX_BYTES} bytes" >&2
+if [ "$size" -gt "$BASELINE_BYTES" ]; then
+  echo "WASM size ${size} exceeds budget ${BASELINE_BYTES} bytes" >&2
   echo "Update $budget_file only when growth is intentional and reviewed." >&2
+  exit 1
+fi
+
+if [ "$size" -gt "$MAX_BYTES" ]; then
+  echo "WASM size ${size} exceeds Soroban limit ${MAX_BYTES} bytes" >&2
   exit 1
 fi
 

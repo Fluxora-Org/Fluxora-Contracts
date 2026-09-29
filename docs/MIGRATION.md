@@ -94,7 +94,11 @@ least as well in v1, or dropped for a reason traceable to a v1 non-goal.
 ## 3. Behaviour deliberately removed
 
 The old contract set exposed **145 entrypoints** (100 stream, 16 factory, 29
-governance). v1 exposes **16**. Grouped by why:
+governance). v1 exposes **16** core entrypoints plus **8 delegation entrypoints**
+(`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
+total of **24**. The delegates are gated on per-operation grants
+(`docs/delegation-revocation.md`) and do not change the core surface the
+renames table below maps. Grouped by why:
 
 **Contradicts §6 (no admin, no upgradeability, no fees, no global pause)**
 `init`, `set_admin`, `upgrade`, `version`, `pause_protocol`, `resume_protocol`,
@@ -104,6 +108,27 @@ governance). v1 exposes **16**. Grouped by why:
 `set_stream_decommissioned`, `sweep_excess`, `get_protocol_fees_accrued`,
 `get_keeper_fee_split`, `set_max_rate_per_second`, plus the entire `factory`
 (16) and `governance` (29) contracts.
+
+> **Decision record — governance source removed (#1675).** The governance
+> contract was dropped here, but its source, `contracts/governance/src/lib.rs`
+> (2,910 lines), stayed in the tree with no `Cargo.toml` and no workspace
+> entry, so nothing compiled or tested it. It was **deleted rather than
+> revived**:
+>
+> * v1 has no admin key, no upgrade path and no settable parameters (§6), so
+>   a multisig/timelock contract has nothing to govern.
+> * Giving it a crate showed it no longer builds against soroban-sdk 27: its
+>   test module fails to compile (duplicate test names, a removed events
+>   API) and the library uses deprecated `events().publish`, which CI's
+>   `clippy -D warnings` rejects. Reviving it would mean re-auditing ~3k lines
+>   of unaudited admin code for a feature v1 deliberately does not have.
+> * Git history keeps the file (last present at `57b2937`) if governance is
+>   ever re-scoped; that would come back as a proper workspace member with
+>   tests, release and size-budget entries.
+>
+> `packaging::governance_crate_is_absent` (in `contracts/stream`) runs
+> `cargo metadata` and fails if a governance package or the
+> `contracts/governance` directory reappears.
 
 **Contradicts §2.3 (no on-chain stream discovery)**
 `get_recipient_streams`, `get_recipient_streams_paginated`,
@@ -326,3 +351,27 @@ incentive is both narrow and adversarially shaped.
 The problem it solves is also not real in v1: an unwithdrawn stream costs the
 contract nothing, TTL is handled by the permissionless rent path, and the
 recipient's claim never expires.
+
+---
+
+## 8. How this document is tested
+
+The path above is walked, not just described. `contracts/stream/src/test/migration.rs`
+parses the §4 table out of this file and checks it against the code:
+
+* every name §4 sends a caller to is present in the committed ABI inventory
+  (`contracts/stream/abi/fluxora_stream.json`), and every name §4 says was left
+  behind is absent from it — so a rename that updates this file without updating
+  the contract, or the reverse, fails a named test;
+* the §3 counts are asserted against the ABI (16 core entry points plus 8
+  delegation entry points, and the old `100 + 16 + 29 = 145` breakdown), and the
+  §7 rulings are asserted as absences;
+* the migration is then performed end to end, using only the v1 spellings this
+  document lists, with the documented semantics asserted for each: `top_up`
+  extends duration and never the rate, `transfer_recipient` is one step gated by
+  the immutable `transferable` flag, `withdraw(id, None)` takes everything
+  accrued, and `pause`/`resume`/`cancel` read the sender from the stream. State
+  is re-checked as intact after every step.
+
+Edit this file and the code together; the test exists to make sure you do.
+

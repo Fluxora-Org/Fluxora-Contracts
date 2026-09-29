@@ -72,6 +72,32 @@ fn withdraw_max_transfers_everything_accrued() {
 }
 
 #[test]
+fn final_withdrawal_after_end_time_releases_exactly_the_remaining_balance() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(40 * DAY);
+    assert_eq!(h.client.withdraw(&id, &Some(300 * ONE)), 300 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 100 * ONE);
+    assert_eq!(h.balance(&h.recipient), 300 * ONE);
+    assert_eq!(h.pool(), 700 * ONE);
+
+    h.warp_to(T0 + 100 * DAY);
+
+    let remaining = h.client.withdrawable_of(&id);
+    assert_eq!(remaining, 700 * ONE);
+
+    let paid = h.client.withdraw(&id, &None);
+    assert_eq!(paid, 700 * ONE);
+    assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
+    assert_eq!(h.pool(), 0);
+    assert_eq!(h.get(id).withdrawn, 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    h.assert_pool_exact();
+}
+
+#[test]
 fn partial_withdrawals_leave_the_remainder_claimable() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
@@ -364,4 +390,42 @@ fn views_are_side_effect_free() {
 
     assert_eq!(a, b);
     assert_eq!(before, after);
+}
+
+/// Discriminants 16 and 17 are not interchangeable: zero available always
+/// yields `NothingToWithdraw`, while an over-request on a positive available
+/// balance yields `InsufficientWithdrawable`.
+#[test]
+fn nothing_vs_insufficient_withdrawable_boundary_is_explicit() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Zero available: both `None` and an explicit over-request report
+    // `NothingToWithdraw`, never `InsufficientWithdrawable`.
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(1_000 * ONE))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+
+    // Positive available: requesting more than available reports
+    // `InsufficientWithdrawable`.
+    h.advance(10 * DAY);
+    let available = h.client.withdrawable_of(&id);
+    assert!(available > 0);
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(available + 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
+    // The failed attempts changed nothing.
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
 }

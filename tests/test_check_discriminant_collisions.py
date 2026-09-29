@@ -600,18 +600,15 @@ class TestRealErrorMd:
     @pytest.fixture
     def real_sections(self):
         repo_root = Path(__file__).resolve().parent.parent
-        docs_path = repo_root / "docs" / "error.md"
+        docs_path = repo_root / "docs" / "ABI.md"
         return cdc._parse_docs(docs_path)
 
-    def test_three_sections_present(self, real_sections):
+    def test_stream_section_present(self, real_sections):
         assert "ContractError (stream)" in real_sections
-        assert "FactoryError (factory)" in real_sections
-        assert "GovernanceError (governance)" in real_sections
 
-    def test_factory_has_16_variants(self, real_sections):
-        factory = real_sections["FactoryError (factory)"]
-        codes = {e.code for e in factory}
-        assert codes == set(range(1, 17))
+    def test_stream_has_all_33_variants(self, real_sections):
+        stream = real_sections["ContractError (stream)"]
+        assert {entry.code for entry in stream} == set(range(1, 34))
 
     def test_stream_has_no_intra_collisions_after_fix(self, real_sections):
         """docs/error.md stream table was fixed: no intra-section collisions remain."""
@@ -621,12 +618,11 @@ class TestRealErrorMd:
 
     def test_cross_section_overlap_exists(self, real_sections):
         msgs = cdc._find_cross_collisions(real_sections)
-        # Codes 1–16 all appear in both stream and factory sections
-        assert len(msgs) >= 1
+        assert msgs == []
 
     def test_main_exits_zero_on_fixed_doc(self):
-        """The fixed docs/error.md has no intra-collisions → main() returns 0."""
+        """The current ABI error table has no intra-collisions."""
         repo_root = Path(__file__).resolve().parent.parent
-        rc = cdc.main(["--docs", str(repo_root / "docs" / "error.md")])
+        rc = cdc.main(["--docs", str(repo_root / "docs" / "ABI.md")])
         assert rc == 0
 

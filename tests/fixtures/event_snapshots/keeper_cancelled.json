@@ -1,0 +1,15 @@
+{
+  "ledger_sequence": 1200,
+  "stream_id": 7,
+  "events": [
+    {
+      "type": "KeeperCancelled",
+      "data": {
+        "keeper": "GKEEPERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "keeper_fee": 500000,
+        "recipient_amount": 9500000,
+        "sender": "GSENDERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    }
+  ]
+}

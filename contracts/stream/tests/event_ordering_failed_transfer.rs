@@ -64,6 +64,10 @@ pub struct PanicToken;
 
 #[contractimpl]
 impl PanicToken {
+    pub fn balance(_env: Env, _id: Address) -> i128 {
+        0
+    }
+
     /// Zero-amount transfers succeed; any other amount panics.
     pub fn transfer(_env: Env, _from: Address, _to: Address, amount: i128) {
         assert_eq!(
@@ -84,7 +88,11 @@ pub struct OnceToken;
 
 #[contractimpl]
 impl OnceToken {
-    pub fn transfer(env: Env, _from: Address, _to: Address, amount: i128) {
+    pub fn balance(env: Env, id: Address) -> i128 {
+        env.storage().instance().get(&id).unwrap_or(0)
+    }
+
+    pub fn transfer(env: Env, _from: Address, to: Address, amount: i128) {
         if amount == 0 {
             return;
         }
@@ -93,6 +101,8 @@ impl OnceToken {
             panic!("OnceToken: transfer already used");
         }
         env.storage().instance().set(&k, &true);
+        let balance = Self::balance(env.clone(), to.clone());
+        env.storage().instance().set(&to, &(balance + amount));
     }
 }
 

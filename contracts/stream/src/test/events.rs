@@ -41,12 +41,12 @@
 
 use soroban_sdk::{testutils::Events, vec, Symbol, TryFromVal, TryIntoVal, Val};
 
-use crate::test::common::{Harness, DAY, ONE, T0};
 use crate::op;
+use crate::test::common::{Harness, DAY, ONE, T0};
 
 extern crate std;
-use std::string::{String, ToString};
 use std::println;
+use std::string::{String, ToString};
 
 // ---------------------------------------------------------------------------
 // Helper
@@ -159,7 +159,8 @@ fn test_all_event_topic_names_are_unique() {
     let delegate = &h.other;
 
     // 9. delegate_granted
-    h.client.grant_delegate(&id2, &h.sender, delegate, &op::CANCEL, &None);
+    h.client
+        .grant_delegate(&id2, &h.sender, delegate, &op::CANCEL, &None);
     capture();
 
     // 10. delegate_revoked
@@ -215,8 +216,7 @@ fn test_all_event_topic_names_are_unique() {
     // If there is a collision the deduped set will be smaller than `expected`;
     // if an event type is missing it will differ in content.
     assert_eq!(
-        unique_names,
-        expected,
+        unique_names, expected,
         "Event inventory mismatch or TOPIC COLLISION DETECTED.\n\
          A collision means two event structs generated the same snake_case name.\n\
          A mismatch means a new event was added without registering it here,\n\
@@ -444,6 +444,51 @@ fn test_golden_events() {
     assert!(ttl_extended_payload.contains_key(Symbol::new(env, "extended_to_ledgers")));
 }
 
+/// **Issue #1688: `resumed` publishes the data needed to recompute the cliff.**
+///
+/// The cliff gate is evaluated on the stream clock, so a paused stream's cliff
+/// moves forward in wall-clock terms by the accumulated `paused_total`. An
+/// indexer that saw only `stream_created` and `resumed` must be able to derive
+/// the new instant; this test reads `paused_total` straight out of the
+/// `resumed` payload and checks it against the moved instant the contract uses.
+#[test]
+fn resumed_event_paused_total_recomputes_the_moved_cliff() {
+    let h = Harness::new();
+    let start = T0;
+    let cliff = start + 1000;
+    let end = start + 10_000;
+    let id = h.create(10_000 * ONE, start, end, cliff, true, true, true);
+
+    // Pause 100s before the cliff, resume 500s after it: 600s absorbed.
+    h.warp_to(cliff - 100);
+    h.client.pause(&id);
+    h.warp_to(cliff + 500);
+    h.client.resume(&id);
+
+    let events = drain_events(&h);
+    let resumed = events
+        .iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "resumed"))
+        .expect("resume must emit a resumed event");
+    let payload: soroban_sdk::Map<Symbol, Val> = resumed.1.try_into_val(&h.env).unwrap();
+    let paused_total: u64 = payload
+        .get(Symbol::new(&h.env, "paused_total"))
+        .expect("resumed must publish paused_total")
+        .try_into_val(&h.env)
+        .unwrap();
+
+    // Enough information: cliff_time (stream_created / get_stream) + paused_total.
+    assert_eq!(
+        paused_total, 600,
+        "resumed must publish the post-resume cumulative paused total"
+    );
+    assert_eq!(
+        h.get(id).cliff_time + paused_total,
+        cliff + 600,
+        "cliff_time + paused_total is the moved wall-clock cliff"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Invariant 2b — Delegate events schema snapshot (previously uncovered)
 //
@@ -510,11 +555,7 @@ fn test_delegate_events() {
     let (granted_topics, granted_data) = &granted_events[0];
 
     // Topic[0] name
-    let granted_name: Symbol = granted_topics
-        .get(0)
-        .unwrap()
-        .try_into_val(env)
-        .unwrap();
+    let granted_name: Symbol = granted_topics.get(0).unwrap().try_into_val(env).unwrap();
     assert_eq!(
         granted_name,
         Symbol::new(env, "delegate_granted"),
@@ -529,8 +570,7 @@ fn test_delegate_events() {
     );
 
     // Payload field schema
-    let granted_payload: soroban_sdk::Map<Symbol, Val> =
-        granted_data.try_into_val(env).unwrap();
+    let granted_payload: soroban_sdk::Map<Symbol, Val> = granted_data.try_into_val(env).unwrap();
     assert!(
         granted_payload.contains_key(Symbol::new(env, "ops")),
         "DelegateGranted payload must contain 'ops'"
@@ -541,7 +581,9 @@ fn test_delegate_events() {
     );
 
     // --- DelegateRevoked ---
-    harness.client.revoke_delegate(&stream_id, &harness.sender, delegate);
+    harness
+        .client
+        .revoke_delegate(&stream_id, &harness.sender, delegate);
 
     let revoked_events: std::vec::Vec<_> = env
         .events()
@@ -575,11 +617,7 @@ fn test_delegate_events() {
     let (revoked_topics, revoked_data) = &revoked_events[0];
 
     // Topic[0] name
-    let revoked_name: Symbol = revoked_topics
-        .get(0)
-        .unwrap()
-        .try_into_val(env)
-        .unwrap();
+    let revoked_name: Symbol = revoked_topics.get(0).unwrap().try_into_val(env).unwrap();
     assert_eq!(
         revoked_name,
         Symbol::new(env, "delegate_revoked"),
@@ -595,14 +633,12 @@ fn test_delegate_events() {
 
     // Payload: DelegateRevoked has no data fields (all information is in topics).
     // Verify it deserializes cleanly.
-    let _revoked_payload: soroban_sdk::Map<Symbol, Val> =
-        revoked_data.try_into_val(env).unwrap();
+    let _revoked_payload: soroban_sdk::Map<Symbol, Val> = revoked_data.try_into_val(env).unwrap();
 
     // Critically: the two delegate events must have DIFFERENT topic[0] values.
     // This is the direct collision check for the most structurally-similar pair.
     assert_ne!(
-        granted_name,
-        revoked_name,
+        granted_name, revoked_name,
         "COLLISION: delegate_granted and delegate_revoked must have different topic[0] symbols"
     );
 

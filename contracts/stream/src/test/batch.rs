@@ -835,6 +835,117 @@ fn duplicate_rejection_is_order_independent_for_balances_and_events() {
 // Retry behaviour
 // ---------------------------------------------------------------------------
 
+/// Regression for #1843. A batch containing the same stream id twice would,
+/// without the duplicate check, settle one stream twice within a single call:
+/// the resolution phase would load the stream's state once per occurrence, compute
+/// the withdrawable amount twice (on the same state), and sum both into the total.
+/// The mutation phase would then apply the first withdrawal, updating storage,
+/// but process the second occurrence against the stale copy loaded earlier —
+/// paying out the same balance again and violating funds conservation.
+///
+/// This test exercises the scenario end-to-end through the public ABI, asserting
+/// that the duplicate is rejected deterministically before any storage write or
+/// token movement, and that funds conservation holds: the returned error is
+/// `DuplicateStreamId`, no events are emitted, and all balances — sender,
+/// recipient, pool, and per-stream accounting — remain unchanged.
+#[test]
+fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
+    let h = Harness::new();
+    
+    // Create a stream with a known accrued balance.
+    let stream_id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(50 * DAY);
+    
+    // At this point, the stream has accrued 50 * ONE and has never been withdrawn.
+    let withdrawable = h.client.withdrawable_of(&stream_id);
+    assert_eq!(withdrawable, 50 * ONE, "stream should have 50 tokens withdrawable");
+    
+    // Capture all balances before the attempted batch.
+    let recipient_before = h.balance(&h.recipient);
+    let sender_before = h.balance(&h.sender);
+    let pool_before = h.pool();
+    let withdrawn_before = h.get(stream_id).withdrawn;
+    
+    // Attempt a batch containing the same stream id twice.
+    // Without the duplicate check, this would:
+    // 1. Load the stream state twice in the resolution phase
+    // 2. Compute withdrawable = 50 * ONE for both occurrences
+    // 3. Sum total = 50 * ONE + 50 * ONE = 100 * ONE
+    // 4. Apply the first withdrawal: stream.withdrawn = 50 * ONE, payout 50 * ONE
+    // 5. Apply the second withdrawal on the stale copy: stream.withdrawn = 50 * ONE again, payout 50 * ONE again
+    // Result: recipient receives 100 * ONE from a stream that only holds 100 * ONE total,
+    // with 50 * ONE remaining unvested — a violation of funds conservation.
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[stream_id, stream_id]))
+        .unwrap_err()
+        .unwrap();
+    
+    // The duplicate check rejects the batch before any mutation.
+    assert_eq!(
+        err,
+        Error::DuplicateStreamId,
+        "batch with duplicate id must be rejected"
+    );
+    
+    // No events were emitted — the failed batch is invisible.
+    assert!(
+        withdrawn_event_ids(&h).is_empty(),
+        "failed batch must not emit any events"
+    );
+    
+    // Funds conservation: all three balances are unchanged.
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance must not change on rejection"
+    );
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance must not change on rejection"
+    );
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance must not change on rejection"
+    );
+    
+    // Per-stream accounting is untouched.
+    assert_eq!(
+        h.get(stream_id).withdrawn,
+        withdrawn_before,
+        "stream's withdrawn field must not change on rejection"
+    );
+    assert_eq!(
+        h.get(stream_id).status,
+        crate::StreamStatus::Active,
+        "stream status must remain Active"
+    );
+    
+    // Demonstrate that a corrected batch (single occurrence) succeeds and pays
+    // exactly the accrued amount, not double.
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[stream_id]));
+    assert_eq!(
+        total, 50 * ONE,
+        "corrected batch pays exactly the accrued balance, once"
+    );
+    assert_eq!(
+        h.get(stream_id).withdrawn,
+        50 * ONE,
+        "stream's withdrawn field reflects a single payment"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before + 50 * ONE,
+        "recipient receives exactly the accrued balance"
+    );
+    
+    // Final funds conservation check: pool liability equals the sum of all
+    // (deposited - withdrawn) across every stream.
+    h.assert_pool_exact();
+}
+
 /// A failed batch is a no-op, so retrying is safe: the identical bad batch
 /// fails identically every time, and the valid portion pays out in full as soon
 /// as the caller drops the bad id. Nothing was consumed, corrupted, or marked.
@@ -931,6 +1042,48 @@ fn a_successful_batch_emits_withdrawn_events_in_batch_order() {
     h.assert_pool_exact();
 }
 
+/// The realistic payroll settlement: a batch of multiple streams (e.g. 16 elements)
+/// all settling to the same recipient, requiring a single authorization doing the
+/// work for the entire batch.
+///
+/// Acceptance criteria:
+/// - A batch of streams sharing a recipient settles with one authorisation.
+/// - The total transferred equals the sum of the individual withdrawable amounts.
+/// - A batch mixing recipients requires the right authorisation for each (covered elsewhere/in auth).
+/// - Events are emitted per stream, not per batch.
+#[test]
+fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
+    let h = Harness::new();
+    let num_streams = 16;
+    let ids: std::vec::Vec<u64> = (0..num_streams)
+        .map(|i| h.create_simple((100 + i as i128) * ONE, 100 * DAY))
+        .collect();
+    h.advance(30 * DAY);
+
+    let expected_per_stream: std::vec::Vec<i128> =
+        ids.iter().map(|id| h.client.withdrawable_of(id)).collect();
+    let expected_total: i128 = expected_per_stream.iter().sum();
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    assert_eq!(total, expected_total);
+
+    // Capture contract events before any further cross-contract call: in the
+    // test host, invoking another contract (e.g. the token `balance` read
+    // below) rotates the recorded event buffer, so reading events afterwards
+    // observes nothing.
+    let event_ids = withdrawn_event_ids(&h);
+
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+    assert_eq!(event_ids, ids);
+
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(h.get(*id).withdrawn, expected_per_stream[i]);
+    }
+    h.assert_pool_exact();
+}
+
 // ---------------------------------------------------------------------------
 // TTL sweep: per-item, deterministic
 // ---------------------------------------------------------------------------
@@ -964,4 +1117,151 @@ fn a_ttl_batch_is_per_item_and_deterministic() {
     assert_eq!(again, extended, "sweep must be deterministic");
     assert_eq!(ttl_of(&h, a), 50_000);
     assert_eq!(ttl_of(&h, b), 50_000);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit batch-size boundary tests (0 / 1 / MAX / MAX+1) for both entry
+// points.  The table below enumerates every combination; each test asserts the
+// exact typed error (or success) and the absence of side effects.
+//
+// Covers the MAX_BATCH_SIZE contract advertised in docs/ABI.md: integrators
+// should be able to rely on the exact boundary, not merely "small works /
+// large fails".
+// ---------------------------------------------------------------------------
+
+// -- batch_withdraw: 0 elements ------------------------------------------------
+#[test]
+fn batch_withdraw_size_zero_is_empty_batch() {
+    let h = Harness::new();
+    let empty: Vec<u64> = Vec::new(&h.env);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &empty)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::EmptyBatch);
+    assert_eq!(h.balance(&h.recipient), 0);
+}
+
+// -- batch_withdraw: 1 element -------------------------------------------------
+#[test]
+fn batch_withdraw_size_one_succeeds() {
+    let h = Harness::new();
+    let id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[id]));
+    assert_eq!(total, 10 * ONE);
+    assert_eq!(h.get(id).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
+// -- batch_withdraw: exactly MAX_BATCH_SIZE -----------------------------------
+#[test]
+fn batch_withdraw_size_exactly_max_succeeds() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, 100 * DAY))
+        .collect();
+    h.advance(5 * DAY);
+
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
+    assert_eq!(total, MAX_BATCH_SIZE as i128 * 5 * ONE);
+    for id in &ids {
+        assert_eq!(h.get(*id).withdrawn, 5 * ONE);
+    }
+    h.assert_pool_exact();
+}
+
+// -- batch_withdraw: MAX_BATCH_SIZE + 1 ---------------------------------------
+#[test]
+fn batch_withdraw_size_max_plus_one_is_batch_too_large() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(10 * ONE, 100 * DAY))
+        .collect();
+    h.advance(10 * DAY);
+
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+    assert_eq!(h.balance(&h.recipient), 0, "nothing drawn");
+    for id in &ids {
+        assert_eq!(h.get(*id).withdrawn, 0, "stream {id} was drawn on");
+    }
+    h.assert_pool_exact();
+}
+
+// -- batch_extend_ttl: 0 elements ---------------------------------------------
+#[test]
+fn batch_extend_ttl_size_zero_is_empty_batch() {
+    let h = Harness::new();
+    let empty: Vec<u64> = Vec::new(&h.env);
+
+    let err = h.client.try_batch_extend_ttl(&empty).unwrap_err().unwrap();
+    assert_eq!(err, Error::EmptyBatch);
+}
+
+// -- batch_extend_ttl: 1 element ----------------------------------------------
+#[test]
+fn batch_extend_ttl_size_one_succeeds() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let id = h.create_simple(100 * ONE, YEAR);
+    age_ledgers(&h, 40_000);
+    let before = ttl_of(&h, id);
+    assert!(before < 15_000, "TTL should have decayed before extension");
+
+    let extended = h.client.batch_extend_ttl(&h.ids(&[id]));
+    assert_eq!(extended, 1);
+    assert_eq!(ttl_of(&h, id), 50_000);
+}
+
+// -- batch_extend_ttl: exactly MAX_BATCH_SIZE ---------------------------------
+#[test]
+fn batch_extend_ttl_size_exactly_max_succeeds() {
+    let h = Harness::new();
+    h.env.ledger().set_max_entry_ttl(50_000);
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE)
+        .map(|_| h.create_simple(100 * ONE, YEAR))
+        .collect();
+    age_ledgers(&h, 40_000);
+    for id in &ids {
+        assert!(ttl_of(&h, *id) < 15_000, "TTL should have decayed");
+    }
+
+    let extended = h.client.batch_extend_ttl(&h.ids(&ids));
+    assert_eq!(extended, MAX_BATCH_SIZE);
+    for id in &ids {
+        assert_eq!(ttl_of(&h, *id), 50_000);
+    }
+}
+
+// -- batch_extend_ttl: MAX_BATCH_SIZE + 1 -------------------------------------
+#[test]
+fn batch_extend_ttl_size_max_plus_one_is_batch_too_large() {
+    let h = Harness::new();
+    let ids: std::vec::Vec<u64> = (0..MAX_BATCH_SIZE + 1)
+        .map(|_| h.create_simple(10 * ONE, YEAR))
+        .collect();
+    let before: std::vec::Vec<u32> = ids.iter().map(|id| ttl_of(&h, *id)).collect();
+
+    let err = h
+        .client
+        .try_batch_extend_ttl(&h.ids(&ids))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::BatchTooLarge);
+
+    for (i, id) in ids.iter().enumerate() {
+        assert_eq!(
+            ttl_of(&h, *id),
+            before[i],
+            "no TTL change for stream {id} on oversized batch"
+        );
+    }
 }

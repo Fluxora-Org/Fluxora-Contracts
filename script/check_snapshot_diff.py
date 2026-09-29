@@ -7,104 +7,165 @@ security-relevant field (auth, events, error codes, storage) was altered.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Security-relevant fields in snapshot JSON files
+# Security-relevant fields in snapshot JSON files.
 SECURITY_FIELDS = {
-    "auth", "events", "error_code", "error", "storage_keys",
-    "storage", "contract_errors", "topics",
+    "auth",
+    "auths",
+    "require_auth",
+    "signatures",
+    "events",
+    "event",
+    "topic",
+    "topics",
+    "data",
+    "error",
+    "error_code",
+    "ContractError",
+    "storage",
+    "storage_keys",
+    "state",
+    "DataKey",
+    "contract_errors",
 }
 
 
-def get_changed_snapshots(base: str) -> list[Path]:
-    """Return snapshot files changed between base and HEAD."""
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-    )
-    if result.returncode != 0:
-        print(f"WARNING: git diff failed: {result.stderr}")
+def is_security_relevant(path: str) -> bool:
+    """Return True when a JSON diff path is security relevant."""
+    if not path:
+        return False
+    components = {
+        component.lower()
+        for component in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", path)
+    }
+    return any(field.lower() in components for field in SECURITY_FIELDS)
+
+
+def _join_path(prefix: str, key: str) -> str:
+    if not prefix:
+        return key
+    return f"{prefix}.{key}"
+
+
+def get_diff_paths(old, new, prefix: str = ""):
+    """Recursively compute a list of changed JSON paths."""
+    if type(old) != type(new):
+        return [prefix] if prefix else [""]
+    if old == new:
         return []
 
-    changed = []
-    for line in result.stdout.splitlines():
-        path = REPO_ROOT / line.strip()
-        if path.suffix == ".json" and "test_snapshots" in str(path):
-            changed.append(path)
-    return changed
+    if isinstance(old, dict):
+        diffs = []
+        keys = set(old) | set(new)
+        for key in sorted(keys):
+            if key not in old:
+                diffs.append(_join_path(prefix, key) if prefix else key)
+            elif key not in new:
+                diffs.append(_join_path(prefix, key) if prefix else key)
+            else:
+                diffs.extend(get_diff_paths(old[key], new[key], _join_path(prefix, key) if prefix else key))
+        return diffs
+
+    if isinstance(old, list):
+        diffs = []
+        length = min(len(old), len(new))
+        for idx in range(length):
+            diffs.extend(get_diff_paths(old[idx], new[idx], f"{prefix}[{idx}]" if prefix else f"[{idx}]"))
+        if len(old) != len(new):
+            diffs.append(prefix if prefix else "")
+        return diffs
+
+    return [prefix] if prefix else [""]
 
 
-def check_snapshot_security_fields(snapshot_path: Path, base: str) -> list[str]:
-    """Check if security fields changed in a snapshot file."""
-    issues = []
-
+def get_changed_files(base: str, head=None) -> list[str]:
+    """Return JSON snapshot files changed between base and head."""
     try:
-        rel = snapshot_path.relative_to(REPO_ROOT)
-    except ValueError:
-        issues.append(f"{snapshot_path.name}: path is not under repository root")
-        return issues
+        if head is None:
+            cmd = ["git", "diff", "--name-only", base]
+        else:
+            cmd = ["git", "diff", "--name-only", base, head]
+        out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=False)
+    except (subprocess.CalledProcessError, OSError):
+        return []
 
+    files = []
+    for line in out.decode("utf-8", errors="replace").splitlines():
+        path = line.strip()
+        if path.endswith(".json") and "test_snapshots" in path:
+            files.append(path)
+    return files
+
+
+def get_file_content(commit, path):
+    """Return file content from git history or disk."""
+    if commit is not None:
+        try:
+            out = subprocess.check_output(["git", "show", f"{commit}:{path}"])
+            return out.decode("utf-8", errors="replace")
+        except (subprocess.CalledProcessError, OSError, ValueError):
+            return None
+    full = REPO_ROOT / path
+    if not full.exists():
+        return None
+    return full.read_text(encoding="utf-8")
+
+
+def _safe_json(text):
+    if text is None:
+        return {}
     try:
-        # Get the base version
-        base_result = subprocess.run(
-            ["git", "show", f"{base}:{rel}"],
-            capture_output=True,
-            text=True,
-            cwd=REPO_ROOT,
-        )
-
-        if base_result.returncode != 0:
-            # New file, no base version
-            return issues
-
-        base_data = json.loads(base_result.stdout)
-        head_data = json.loads(snapshot_path.read_text())
-
-        for field in SECURITY_FIELDS:
-            if field in base_data and field in head_data:
-                if base_data[field] != head_data[field]:
-                    issues.append(f"{rel}: field '{field}' changed")
-            elif field in base_data and field not in head_data:
-                issues.append(f"{rel}: field '{field}' removed")
-            elif field not in base_data and field in head_data:
-                issues.append(f"{rel}: field '{field}' added")
-    except (json.JSONDecodeError, OSError) as e:
-        issues.append(f"{snapshot_path.name}: error: {e}")
-
-    return issues
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return {}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check snapshot security diffs")
-    parser.add_argument("--base", required=True, help="Base ref to compare against")
+    parser.add_argument("--base", default="HEAD", help="Base ref to compare against")
+    parser.add_argument("--head", default=None, help="Optional head ref to compare against")
     args = parser.parse_args()
 
-    snapshots = get_changed_snapshots(args.base)
-    if not snapshots:
-        print("No snapshot files changed.")
+    changed = get_changed_files(args.base, args.head)
+    if not changed:
+        print("No snapshot JSON files changed.")
         return 0
 
-    print(f"Checking {len(snapshots)} changed snapshot file(s)...")
-    all_issues = []
+    print(f"Checking {len(changed)} changed snapshot file(s)...")
+    found_security = False
+    messages = []
 
-    for snap in snapshots:
-        issues = check_snapshot_security_fields(snap, args.base)
-        all_issues.extend(issues)
+    for rel_path in changed:
+        old_text = get_file_content(args.base, rel_path)
+        new_text = get_file_content(args.head, rel_path)
+        old_data = _safe_json(old_text)
+        new_data = _safe_json(new_text)
 
-    if all_issues:
-        print("FAIL: Security-relevant snapshot changes detected:")
-        for issue in all_issues:
-            print(f"  - {issue}")
-        print("\nThese changes require mandatory extra review before merging.")
+        diffs = get_diff_paths(old_data, new_data)
+        security_paths = [d for d in diffs if is_security_relevant(d)]
+        if security_paths:
+            found_security = True
+            messages.append(f"{rel_path}: {', '.join(sorted(set(security_paths)))}")
+        elif diffs:
+            print(
+                f"[INFO] Changes in {rel_path}: {', '.join(sorted(set(diffs)))}; "
+                "none are security-relevant."
+            )
+
+    if found_security:
+        print("Security-relevant fields changed:")
+        for msg in messages:
+            print(f"  - {msg}")
+        print("\nMandatory extra review required.")
         return 1
 
-    print("OK: No security-relevant snapshot changes detected.")
+    print("No security-relevant snapshot changes detected.")
     return 0
 
 

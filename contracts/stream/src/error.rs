@@ -35,6 +35,8 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 34,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -68,9 +70,14 @@ pub enum Error {
     StreamMatured = 15,
 
     // --- Withdrawal ---
-    /// Requested amount exceeds the currently withdrawable balance.
+    /// Explicit amount exceeds a positive withdrawable balance. Returned only
+    /// when the available balance is non-zero; a zero balance returns
+    /// [`Self::NothingToWithdraw`] instead, regardless of the requested amount.
     InsufficientWithdrawable = 16,
-    /// Withdrawable balance is zero.
+    /// Withdrawable balance is zero on a live stream. Returned for both
+    /// `None` and explicit amounts; the zero check runs before amount
+    /// comparison, so it takes precedence over
+    /// [`Self::InsufficientWithdrawable`].
     NothingToWithdraw = 17,
     /// Explicit withdraw amount was zero or negative.
     InvalidAmount = 18,
@@ -120,6 +127,11 @@ pub enum Error {
     /// Surfaces when the token sub-invocation fails with an `Abort` (host
     /// trap) rather than a typed contract error, which is what the host
     /// produces when the callee contract does not exist.
+    ///
+    /// Reserved for real WASM execution: the native test host types every
+    /// sub-invocation failure as a contract error, so this collapses into
+    /// [`Self::TokenTransferFailed`] there and cannot be produced by a test.
+    /// Classified as reserved in `test::error_reachability`.
     TokenMissing = 26,
 
     // --- Delegation ---
@@ -130,6 +142,11 @@ pub enum Error {
 
     // --- Batch validation ---
     /// A serialized vector element of a batch is not a `u64`.
+    ///
+    /// Defence in depth against a raw XDR caller. The typed client argument
+    /// is `Vec<u64>`, so the host rejects a non-`u64` element before this body
+    /// runs; no well-typed public call can reach it. Classified as reserved in
+    /// `test::error_reachability`.
     MalformedStreamId = 29,
 
     // --- Transfer ---
@@ -138,5 +155,34 @@ pub enum Error {
 
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
+    ///
+    /// Superseded by [`Self::InvalidAmount`]: `top_up` rejects
+    /// `amount <= 0` as `InvalidAmount` before any schedule arithmetic runs,
+    /// so no entry point emits 31. Frozen ABI — do not renumber. Classified as
+    /// reserved in `test::error_reachability`.
     InvalidTopUp = 31,
+
+    // --- Token assumptions ---
+    /// A deposit-side pull (`create_stream`, `top_up`, `delegate_top_up`)
+    /// delivered a different amount than requested.
+    ///
+    /// The contract measures its own token balance before and after the pull
+    /// and requires the delta to equal the requested amount exactly. This is
+    /// how a fee-on-transfer or balance-adjusting token is detected and
+    /// rejected on the deposit leg — see `docs/ABI.md` "Token assumptions"
+    /// for the full statement of what a stream's token is assumed to do, and
+    /// what happens when an assumption cannot be checked at call time (a
+    /// rebasing token).
+    TokenAmountMismatch = 32,
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    ///
+    /// A defensive guard on `pause`, `resume`, `top_up` and
+    /// `transfer_recipient`. `vested` is non-decreasing under every mutation
+    /// those four paths can make — pause/resume leave elapsed time unchanged,
+    /// `top_up` scales numerator and denominator together, and the recipient
+    /// is not an input to the formula — so no reachable call produces it.
+    /// The guard stays because the invariant it protects is load-bearing.
+    /// Classified as reserved in `test::error_reachability`.
+    VestedDecreased = 33,
 }
