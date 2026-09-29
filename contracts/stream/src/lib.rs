@@ -43,6 +43,11 @@
 //! admin rotation and nothing user-configurable in storage. Immutability is
 //! what lets another protocol depend on this one.
 //!
+//! **Upgrade posture: the contract is immutable.** There is no `upgrade`
+//! entry point, no admin, and no storage slot that could authorise replacing
+//! the deployed WASM. See `docs/ABI.md` "Upgrade posture" and
+//! `docs/MIGRATION.md` for the consequences.
+//!
 //! ## The single operator: an opt-in emergency halt (#1818)
 //!
 //! The one exception is the contract-level emergency stop. An operator can be
@@ -157,6 +162,11 @@ pub const MAX_BATCH_SIZE: u32 = 16;
 /// The on-chain contract is immutable, so a bump is a *new deployment*, not an
 /// in-place upgrade. See `docs/ABI.md` and `test::abi`.
 ///
+/// Immutability is deliberate: the contract exposes no upgrade entry point,
+/// so a version bump can only ever ship as a fresh deployment with a new
+/// contract id. See `docs/MIGRATION.md` for the migration path that follows
+/// from that.
+///
 /// **2** — [`ReleaseCurve`] support. `get_stream`'s `Stream` return type grew a
 /// `curve` field and `StreamCreated` grew a `curve` payload, so a typed client
 /// built against version 1 cannot decode either. The new
@@ -177,6 +187,28 @@ pub const MAX_BATCH_SIZE: u32 = 16;
 /// readers and indexers decode it from storage or an event, both of which carry
 /// the new field explicitly.
 pub const ABI_VERSION: u32 = 2;
+
+/// Whether the deployed contract can be replaced in place.
+///
+/// **`false`, deliberately.** This constant exists so the posture is stated
+/// in the ABI itself rather than only in prose: an integrator can read it
+/// on-chain, and `test::abi` asserts it matches the absence of any upgrade
+/// entry point.
+///
+/// # Consequences
+///
+/// * **No upgrade entry point.** The contract exposes no `upgrade`,
+///   `set_admin`, or `migrate` method, and no storage key holds a WASM hash
+///   or an admin address. `test::abi` fails if one is ever added without
+///   flipping this constant and updating `docs/ABI.md`.
+/// * **A new ABI version is a new deployment.** [`ABI_VERSION`] bumps ship
+///   as a fresh contract id; existing streams stay on the old contract and
+///   must be drained or cancelled there. `docs/MIGRATION.md` describes that
+///   path.
+/// * **The halt operator is not an upgrade path.** It can stop settlement
+///   ([`FluxoraStream::halt`]) but cannot change code, storage layout, or
+///   any stream's terms.
+pub const UPGRADEABLE: bool = false;
 
 /// Call `token.transfer(from, to, amount)` and map any failure to a stable
 /// stream-level error.
@@ -2228,6 +2260,16 @@ impl FluxoraStream {
     /// of the emergency stop entirely.
     pub fn halt_operator(env: Env) -> Option<Address> {
         storage::halt_operator(&env)
+    }
+
+    /// Whether the deployed contract can be replaced in place.
+    ///
+    /// Always `false` — this is the on-chain statement of the upgrade
+    /// posture documented in `docs/ABI.md` and `docs/MIGRATION.md`. It is a
+    /// constant, not a storage read, so it answers even before any stream
+    /// exists and cannot be changed by the halt operator or anyone else.
+    pub fn upgradeable(_env: Env) -> bool {
+        UPGRADEABLE
     }
 
     // ---------------------------------------------------------------------

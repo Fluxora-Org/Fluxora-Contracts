@@ -29,6 +29,14 @@ There is therefore no upgrade authorization or in-place migration process.
 The ABI inventory below is the deployed surface and contains no upgrade or
 admin-rotation method.
 
+This is confirmed against the entry points the contract actually exposes: the
+complete public surface is the 24 methods enumerated in [Entry points](#entry-points)
+— lifecycle, views, maintenance, delegation and the emergency halt — and none of
+them replaces code, rotates an admin, or writes a new implementation hash. There
+is no `upgrade`, `set_admin`, `migrate` or equivalent entry point in the ABI
+inventory or in `contracts/stream/src/lib.rs`. The posture is therefore a
+property of the deployed surface, not merely a policy statement.
+
 The single exception to "no operator" is the **emergency halt** (issue #1818):
 an operator address can be installed once, has no rotation path, and can only
 stop and restart settlement contract-wide — it holds no key over funds, no
@@ -47,7 +55,7 @@ stellar contract info interface --id CBCGTSCJ… --network testnet
 ## What "frozen" means
 
 The core contract is **immutable** — no admin key, no upgrade path (see the
-non-goals). The interface therefore cannot change on the deployed contract at
+[Upgrade posture](#upgrade-posture) above). The interface therefore cannot change on the deployed contract at
 all; a change means a *new deployment at a new address*.
 
 So the freeze is a commitment about how we manage that:
