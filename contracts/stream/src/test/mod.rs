@@ -78,6 +78,9 @@ mod stream_count_consistency;
 mod read_methods_no_side_effects;
 mod read_ttl_matrix;
 
+// Issue #1835 — a recipient transfer in the same ledger as a withdrawal.
+mod transfer_withdraw_same_ledger;
+
 // Package / artifact naming gates, run by CI's `packaging::` step. Also
 // guards #1675 (no inert governance crate). Previously unregistered, so
 // that CI step matched zero tests.
