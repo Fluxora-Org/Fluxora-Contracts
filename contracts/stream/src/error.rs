@@ -207,3 +207,26 @@ pub enum Error {
     /// rebasing token).
     TokenAmountMismatch = 32,
     // --- Monotonicity ---
+    /// Defensive guard against an operation decreasing vested funds.
+    VestedDecreased = 33,
+
+    // --- Contract-level emergency halt ---
+    /// A state-changing operation was attempted while the contract is halted.
+    ContractHalted = 34,
+    /// A halt operator was already configured.
+    HaltOperatorAlreadySet = 35,
+    /// No halt operator is configured.
+    HaltOperatorNotSet = 36,
+    /// The contract is already halted.
+    ContractAlreadyHalted = 37,
+    /// The contract is not halted.
+    ContractNotHalted = 38,
+
+    // --- Rebase detection ---
+    /// The token pool balance is below Fluxora's accounted liabilities.
+    PoolBalanceDrift = 39,
+
+    // --- Duration limits ---
+    /// A schedule duration exceeds [`crate::MAX_STREAM_DURATION`].
+    DurationTooLong = 41,
+}

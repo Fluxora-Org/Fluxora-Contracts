@@ -31,6 +31,30 @@ fn top_up_extends_the_end_date_at_the_same_rate() {
     h.assert_pool_exact();
 }
 
+#[test]
+fn top_up_cannot_extend_a_maximum_duration_stream() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = crate::MAX_STREAM_DURATION;
+    let id = h.create(
+        duration as i128 + 1,
+        start,
+        start + duration,
+        start,
+        true,
+        true,
+        true,
+    );
+    let pool_before = h.pool();
+
+    let err = h.client.try_top_up(&id, &2).unwrap_err().unwrap();
+
+    assert_eq!(err, Error::DurationTooLong);
+    assert_eq!(h.get(id).end_time, start + duration);
+    assert_eq!(h.get(id).deposited, duration as i128 + 1);
+    assert_eq!(h.pool(), pool_before);
+}
+
 /// The defining property: a top-up must not change what is already withdrawable.
 #[test]
 fn top_up_does_not_retroactively_vest_elapsed_time() {

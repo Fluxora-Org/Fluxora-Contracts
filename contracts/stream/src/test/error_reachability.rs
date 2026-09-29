@@ -44,13 +44,13 @@
 //! precondition is arranged directly.
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::Address;
+use soroban_sdk::{Address, String};
 
 use super::common::*;
 use super::create::seed_counter;
 use super::error_discriminants::DISCRIMINANT_FIXTURE;
 use super::token_errors::register_fee_on_transfer_token;
-use crate::{op, Error};
+use crate::{op, Error, MAX_REFERENCE_LENGTH, MAX_STREAM_DURATION};
 
 // ---------------------------------------------------------------------------
 // Classification
@@ -76,7 +76,7 @@ enum Account {
 /// Kept as a value so the tests can iterate it. `names_and_discriminants_match_the_abi_fixture`
 /// pins its length to `DISCRIMINANT_FIXTURE`, which is itself pinned to
 /// `LAST_DISCRIMINANT`, so dropping an entry here fails the suite.
-const ALL: [Error; 39] = [
+const ALL: [Error; 41] = [
     Error::StreamNotFound,
     Error::InvalidTimeRange,
     Error::InvalidCliff,
@@ -110,12 +110,14 @@ const ALL: [Error; 39] = [
     Error::InvalidTopUp,
     Error::TokenAmountMismatch,
     Error::VestedDecreased,
-    Error::PoolBalanceDrift,
     Error::ContractHalted,
     Error::HaltOperatorAlreadySet,
     Error::HaltOperatorNotSet,
     Error::ContractAlreadyHalted,
     Error::ContractNotHalted,
+    Error::PoolBalanceDrift,
+    Error::InvalidReferenceLength,
+    Error::DurationTooLong,
 ];
 
 /// Frozen allowlist of discriminants that have no reaching test, in ascending
@@ -644,6 +646,57 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
             "PoolBalanceDrift",
             39,
             Account::Reach(super::rebase_drift::drift_error),
+        ),
+
+        Error::InvalidReferenceLength => (
+            "InvalidReferenceLength",
+            40,
+            Account::Reach(|h| {
+                let now = h.now();
+                let reference =
+                    String::from_str(&h.env, &"x".repeat((MAX_REFERENCE_LENGTH + 1) as usize));
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(1_000 * ONE),
+                        &now,
+                        &(now + DAY),
+                        &now,
+                        &true,
+                        &true,
+                        &true,
+                        &Some(reference),
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+
+        Error::DurationTooLong => (
+            "DurationTooLong",
+            41,
+            Account::Reach(|h| {
+                let now = h.now();
+                let duration = MAX_STREAM_DURATION + 1;
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(duration as i128),
+                        &now,
+                        &(now + duration),
+                        &now,
+                        &true,
+                        &true,
+                        &true,
+                        &None,
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
         ),
 
         // --- Contract-level emergency halt (#1818) -------------------------------

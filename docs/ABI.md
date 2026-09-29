@@ -145,8 +145,19 @@ trial calls.
 | constant | value | applies to | notes |
 |---|---|---|---|
 | **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
-| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (34)](#error). |
+| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (40)](#error). |
+| **`MAX_STREAM_DURATION`** | **3,153,600,000 seconds (100 × 365 days)** | `create_stream`, `batch_create`, `top_up`, `delegate_top_up` | Total schedule duration may not exceed this value. Exceeding it returns [`DurationTooLong` (41)](#error). |
 | `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
+
+### Accrual precision at the duration limit
+
+Linear accrual is `floor(deposited * elapsed / duration)`. At every point
+before maturity, the floored value is less than **1 stroop** below the exact
+rational amount; the remainder is discarded on each read, not accumulated
+across reads. At the maximum duration `D = 3,153,600,000`, choosing deposit
+`D + 1` and elapsed time `D - 1` produces a remainder of `D - 1`: the measured
+error is `1 - 1/D`, or approximately **0.999999999683 stroops**. The maximum-
+duration case therefore stays within the strict `< 1 stroop` bound.
 
 ### Derivation of `MAX_BATCH_SIZE = 16`
 
@@ -392,20 +403,21 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
-| 34 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
 | 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
 | 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
 | 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
 | 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
 | 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
-| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
+| 39 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
+| 40 | `InvalidReferenceLength` | Creation reference exceeds `MAX_REFERENCE_LENGTH` (64 characters). | reachable |
+| 41 | `DurationTooLong` | Creation or a top-up extension would exceed `MAX_STREAM_DURATION`. | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
 * `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
 * `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
 * `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
-* `PoolBalanceDrift` (34) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
+* `PoolBalanceDrift` (39) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
 
@@ -488,7 +500,7 @@ stream's `deposited - withdrawn`.
 > `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`,
 > `delegate_cancel`, `top_up` and `delegate_top_up`. A rebase between two
 > operations is therefore caught by the next one, which reverts in full with
-> [`Error::PoolBalanceDrift`](#error) (34).
+> [`Error::PoolBalanceDrift`](#error) (39).
 >
 > The test is `actual < expected`, not `actual != expected`. A **surplus** —
 > a positive rebase, a donation, dust — is accepted, because it cannot cause
@@ -730,7 +742,7 @@ change is a single storage write plus one event.
 (`sender.require_auth()`). The recipient cannot resume, and there is no admin
 key.
 | `stream_id` | `u64` | Id of an existing, non-terminal stream whose accrual clock has not yet reached `end_time`. Ids run `0..stream_count()`; an id that was never issued, or whose entry has been archived, fails with `StreamNotFound`. |
-| `amount` | `i128` | Strictly positive (`> 0`), in the stream token's smallest unit. Must be large enough that `floor(amount * duration / deposited) >= 1` (otherwise `TopUpTooSmall`). Must also leave `new_deposited >= new_duration` after the extension (`DepositRateTooLow`). |
+| `amount` | `i128` | Strictly positive (`> 0`), in the stream token's smallest unit. Must be large enough that `floor(amount * duration / deposited) >= 1` (otherwise `TopUpTooSmall`). The resulting duration must not exceed `MAX_STREAM_DURATION`; it must also leave `new_deposited >= new_duration` (`DepositRateTooLow`). |
 
 **Authorization.** The stream's `sender` must authorise the call
 (`sender.require_auth()`). The recipient cannot top up, and there is no admin
@@ -880,7 +892,7 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `TokenTransferFailed` | 25 | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above. |
 | `TokenMissing` | 26 | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
 | `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
-| `PoolBalanceDrift` | 34 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
+| `PoolBalanceDrift` | 39 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
 
 `StreamNotActive` (11) is reserved and is not returned here.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
@@ -890,13 +902,14 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `InvalidAmount` | 18 | `amount <= 0`. |
 | `Overflow` | 22 | Checked arithmetic overflow while computing `delta`, `new_deposited`, `new_end`, `new_duration`, or the creation-time product guard; or `delta` outside `0..=u64::MAX`. |
 | `TopUpTooSmall` | 23 | `floor(amount * duration / deposited) == 0` — the top-up cannot buy even one second of schedule, so absorbing it would require raising the rate. |
+| `DurationTooLong` | 41 | The resulting `end_time - start_time` would exceed `MAX_STREAM_DURATION`. No token pull or state write occurs. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the deposit transfer (insufficient sender balance, trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
-| `PoolBalanceDrift` | 34 | After the pull landed, the token's pool balance was still short of the total Fluxora accounts for — a rebase since the last operation on this token. The top-up reverts in full. |
+| `PoolBalanceDrift` | 39 | After the pull landed, the token's pool balance was still short of the total Fluxora accounts for — a rebase since the last operation on this token. The top-up reverts in full. |
 
 This list was cross-checked against `FluxoraStream::top_up` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs) and the shared
-`token_transfer` helper; the ten variants above are the complete set it can
+`token_transfer` helper; the eleven variants above are the complete set it can
 return. `Unauthorized` (7) is **not** reachable here — auth failures abort in
 the host before a typed error is produced.
 
@@ -1029,7 +1042,7 @@ Stops accrual and refunds the unvested remainder to the sender. The recipient ke
 * `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
 * `TokenTransferFailed` (25): The token contract refused the refund transfer.
 * `TokenMissing` (26): The token contract does not exist.
-* `PoolBalanceDrift` (34): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
+* `PoolBalanceDrift` (39): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
 
 **Events:**
 * `cancelled` — Emitted on success.
@@ -1055,7 +1068,7 @@ or wrong signature surfaces as a host authentication failure, not a typed
 | `Overflow` | 22 | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
-| `PoolBalanceDrift` | 34 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
+| `PoolBalanceDrift` | 39 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
 
 This list was cross-checked against `FluxoraStream::withdraw` and
 `FluxoraStream::apply_withdrawal` in
@@ -1187,6 +1200,7 @@ fn create_stream(
 **Valid Ranges and Constraints:**
 
 * **Time Range:** `end_time > start_time` (strictly greater). Duration must be at least 1 second. Zero-duration streams are rejected with `InvalidTimeRange`, not treated as "already vested".
+* **Maximum Duration:** `end_time - start_time ≤ MAX_STREAM_DURATION` (3,153,600,000 seconds, 100 × 365 days); larger ranges return `DurationTooLong` (41).
 * **Cliff:** `cliff_time` must satisfy `start_time ≤ cliff_time ≤ end_time`. Both boundary values are legal: `cliff_time == start_time` means no cliff, `cliff_time == end_time` means a single lump-sum payout at maturity.
 * **Deposit:** Must be positive (`deposit > 0`).
 * **Rate Floor:** `deposit ≥ duration_in_seconds`, ensuring the per-second rate does not truncate to zero. For example, a one-year stream requires at least 31,536,000 stroops (~3.16 USDC with 7 decimals).
@@ -1201,9 +1215,10 @@ All validation errors are checked **before** the token transfer. A rejected crea
 | error | condition |
 |---|---|
 | `SelfStream` (6) | `sender == recipient` |
-| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
+| `InvalidReferenceLength` (40) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
 | `InvalidDeposit` (4) | `deposit ≤ 0` |
 | `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
+| `DurationTooLong` (41) | `end_time - start_time > MAX_STREAM_DURATION` |
 | `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |
 | `DepositRateTooLow` (5) | `deposit < (end_time - start_time)`, causing per-second rate to truncate to zero |
 | `Overflow` (22) | `deposit × (end_time - start_time)` does not fit in `i128` |

@@ -453,7 +453,7 @@ to instrument, so it cannot be caught *as it happens*. It is no longer silent,
 though: Fluxora tracks the balance it expects to hold per token and reconciles
 it against the token's own `balance` at the end of every operation that moves
 pool funds, so the next `withdraw`, `cancel`, `top_up` or `batch_withdraw`
-after a rebase reverts with `Error::PoolBalanceDrift` (34) rather than
+after a rebase reverts with `Error::PoolBalanceDrift` (39) rather than
 misaccounting.
 
 What is left open is narrower than it was, and inherent:
