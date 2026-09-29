@@ -40,6 +40,8 @@ mod capabilities;
 mod amount_domain;
 mod cancel_events;
 mod cliff;
+// Issue #1824: `delegate_top_up` held to the rejection depth of `top_up`.
+mod delegate_top_up;
 mod delegation;
 mod pause;
 mod storage_keys;
