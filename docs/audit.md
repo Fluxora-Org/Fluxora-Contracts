@@ -14,6 +14,7 @@ Last verified: 2026-08-29 (PR #1665)
 | `create_stream` | Create a new payment stream with deposit, schedule, and capability flags |
 | `batch_create` | Atomically create multiple payment streams in one transaction |
 | `create_stream` | Create a new payment stream with deposit, schedule, and capability flags (`cliff_mode` is `Schedule`) |
+| `create_stream_with_curve` | Create a stream with an explicit linear, step, or front-loaded release curve |
 | `create_stream_with_cliff_mode` | Same as `create_stream`, plus an explicit `cliff_mode` choosing whether the cliff gate is read on the stream clock or the wall clock |
 | `top_up` | Extend stream duration at a fixed rate (sender auth) |
 | `withdraw` | Pull accrued balance; `None` = withdraw max |
@@ -47,6 +48,7 @@ Last verified: 2026-08-29 (PR #1665)
 | `refundable_of` | Return refundable amount |
 | `stream_count` | Return total stream count |
 | `stream_exists` | Check if a stream ID exists |
+| `upgradeable` | Report whether the contract can be replaced in place (always `false`) |
 | `halted` | Whether the contract-level emergency halt is engaged |
 | `halt_operator` | The installed halt operator, or `None` when the contract is not haltable |
 
