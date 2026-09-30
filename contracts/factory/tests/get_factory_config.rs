@@ -36,7 +36,7 @@ fn instance_ttl(env: &Env, fid: &Address) -> u32 {
 fn test_get_factory_config_carries_admin_stream_contract_cap_and_min_duration() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -62,7 +62,7 @@ fn test_get_factory_config_carries_admin_stream_contract_cap_and_min_duration() 
 fn test_get_factory_config_round_trips_large_and_zero_valued_fields() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -81,7 +81,7 @@ fn test_get_factory_config_round_trips_large_and_zero_valued_fields() {
 fn test_get_factory_config_before_init_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
 
     let result = factory.try_get_factory_config();
@@ -100,7 +100,7 @@ fn test_get_factory_config_before_init_returns_not_initialized() {
 fn test_failed_get_factory_config_leaves_factory_uninitialised() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
 
     assert!(factory.try_get_factory_config().is_err());
@@ -122,7 +122,7 @@ fn test_failed_get_factory_config_leaves_factory_uninitialised() {
 fn test_get_factory_config_performs_no_storage_writes() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -167,7 +167,7 @@ fn test_get_factory_config_does_not_restore_a_decayed_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
     env.ledger().set_max_entry_ttl(50_000);
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
@@ -209,7 +209,7 @@ fn test_get_factory_config_does_not_restore_a_decayed_instance_ttl() {
 fn test_get_factory_config_tracks_every_admin_setter() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);

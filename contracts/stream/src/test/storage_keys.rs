@@ -863,7 +863,7 @@ fn v1_layout_is_no_longer_decodable_and_that_is_deliberate() {
         .collect();
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
-    let decoded =
+    let _decoded =
         StreamRecord::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
     // Note the failure mode: this is not a clean `Err`. Decoding a `Stream` that
     // is 14 fields long against a 15-field reader fails inside the host while

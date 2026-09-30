@@ -577,7 +577,7 @@ mod proptest_sequences {
 
             for amount in &amounts {
                 let before = h.vested_snapshot();
-                let _ = h.client.try_top_up(&id, &amount);
+                let _ = h.client.try_top_up(&id, amount);
                 h.assert_no_vested_regression(
                     &before,
                     &std::format!("top_up({amount})"),

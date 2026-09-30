@@ -92,8 +92,6 @@ extern crate std;
 mod accrual;
 mod error;
 mod events;
-#[cfg(test)]
-mod protocol_limits;
 mod storage;
 mod types;
 
@@ -1415,7 +1413,7 @@ impl FluxoraStream {
         storage::save_stream(env, stream_id, stream);
 
         if refund > 0 {
-            storage::debit_pool(&env, &token, refund)?;
+            storage::debit_pool(env, &token, refund)?;
             token_transfer(
                 env,
                 &token,
@@ -1427,7 +1425,7 @@ impl FluxoraStream {
         // Reconcile the pool now the refund has left it. Checked even when the
         // refund was zero: a rebase since the last operation on this token is
         // exactly as dangerous with nothing to refund.
-        verify_pool_balance(&env, &token)?;
+        verify_pool_balance(env, &token)?;
 
         // Issue #1584: the event's `vested` is read off the settled stream by
         // the helper (`stream.deposited`, set above), so it cannot disagree with
