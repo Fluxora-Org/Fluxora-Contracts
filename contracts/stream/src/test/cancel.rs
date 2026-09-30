@@ -312,6 +312,123 @@ fn cancel_while_paused_settles_at_the_frozen_clock() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #1837 — paused cancellation, beyond the simplest case
+//
+// The base suite already pins the headline scenario: pause, let the wall clock
+// run, cancel, and settle at the frozen instant rather than at `now`
+// (`cancel_while_paused_settles_at_the_frozen_clock`). The tests below cover
+// two complementary edges the simple scenario does not reach — a withdrawal
+// taken *while* paused, and several pause/resume cycles before the final pause
+// — where the frozen clock must still drive every figure exactly.
+// ---------------------------------------------------------------------------
+
+/// Cancel while paused *after* a partial withdrawal from the frozen accrual.
+///
+/// The withdrawal leaves the pool while the clock is stopped and must be
+/// accounted for separately from the refund: the three outgoing quantities
+/// (refund, still-claimable tail, already-withdrawn) must partition the original
+/// deposit, each measured against the freeze point rather than the wall clock
+/// that kept running during the pause.
+#[test]
+fn cancel_while_paused_after_partial_withdrawal() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let sender_before = h.balance(&h.sender);
+
+    h.advance(30 * DAY);
+    h.client.pause(&id); // freeze at 30 days: 300 accrued
+
+    // The wall clock runs on, but the payout stays fixed at the freeze point.
+    h.advance(50 * DAY);
+    assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+
+    // Claim part of the frozen accrual while paused. A withdrawal against
+    // already-vested funds is not a clock change.
+    assert_eq!(h.client.withdraw(&id, &Some(100 * ONE)), 100 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 200 * ONE);
+
+    // More wall-clock time passes paused; settlement must ignore all of it.
+    h.advance(20 * DAY);
+    h.client.cancel(&id);
+
+    // Refund is priced at the 30-day freeze point: 1000 - 300 = 700, regardless
+    // of the 70 days the ledger clock advanced during the pause.
+    assert_eq!(h.balance(&h.sender), sender_before + 700 * ONE);
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        200 * ONE,
+        "the unwithdrawn tail stays claimable"
+    );
+    let s = h.get(id);
+    assert_eq!(s.deposited, 300 * ONE, "deposit rewritten to frozen vested");
+    assert_eq!(s.withdrawn, 100 * ONE);
+    assert_eq!(s.paused_at, None, "pause cleared on cancel");
+
+    // refunded=700 + claimable=200 + withdrawn=100 == original 1000.
+    assert_split(&h, id, 1_000 * ONE);
+
+    // Stays frozen, and the recipient can drain the 200 tail exactly.
+    h.advance(YEAR);
+    assert_eq!(h.client.withdrawable_of(&id), 200 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 200 * ONE);
+    assert_eq!(h.balance(&h.recipient), 300 * ONE, "100 + 200 withdrawn total");
+    assert_eq!(h.pool(), 0);
+    h.assert_pool_exact();
+}
+
+/// Cancel while paused after more than one pause/resume cycle.
+///
+/// Only *accrued* wall-clock time counts: both paused intervals land in
+/// `paused_total` and never in vesting, so the refund, the frozen `end_time`,
+/// and the claimable tail are all the same figure a single uninterrupted
+/// 30-day accrual would produce.
+#[test]
+fn cancel_while_paused_after_multiple_pause_resume_cycles() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let sender_before = h.balance(&h.sender);
+
+    // First cycle: 20 days of accrual, then 30 days frozen.
+    h.advance(20 * DAY);
+    h.client.pause(&id);
+    h.advance(30 * DAY);
+    h.client.resume(&id);
+    assert_eq!(h.get(id).paused_total, 30 * DAY);
+
+    // Second accrual window: 10 more days, then pause for good.
+    h.advance(10 * DAY);
+    h.client.pause(&id);
+    assert_eq!(
+        h.client.vested_of(&id),
+        300 * ONE,
+        "30 accrued days, not the 60 wall-clock days since T0"
+    );
+
+    // A long final pause elapses; cancel without resuming.
+    h.advance(45 * DAY);
+    h.client.cancel(&id);
+
+    // Settlement honours only the 30 days of unpaused accrual.
+    assert_eq!(h.balance(&h.sender), sender_before + 700 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+    let s = h.get(id);
+    assert_eq!(s.deposited, 300 * ONE);
+    assert_eq!(s.paused_at, None, "pause cleared on cancel");
+    assert_eq!(
+        s.end_time,
+        T0 + 30 * DAY,
+        "schedule collapses onto accrued time, not the wall clock"
+    );
+
+    assert_split(&h, id, 1_000 * ONE);
+
+    // Still frozen after a further wall-clock jump.
+    h.advance(YEAR);
+    assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+    h.assert_pool_exact();
+}
+
+// ---------------------------------------------------------------------------
 // Explicit balance-split invariant tests
 //
 // Each asserts: refunded + claimable + already_withdrawn == original_deposit
