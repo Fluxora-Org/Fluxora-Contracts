@@ -519,6 +519,7 @@ impl FluxoraStream {
         transferable: bool,
         reference: Option<String>,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
         sender.require_auth();
 
         Self::create_stream_unchecked(
@@ -627,6 +628,9 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
+
         Self::create_stream_inner(
             env,
             sender,
@@ -669,10 +673,6 @@ impl FluxoraStream {
         reference: Option<String>,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
-        // Emergency halt (#1818): refuse state changes before anything else.
-        Self::require_not_halted(&env)?;
-        sender.require_auth();
-
         if sender == recipient {
             return Err(Error::SelfStream);
         }
@@ -762,6 +762,7 @@ impl FluxoraStream {
         sender: Address,
         requests: Vec<BatchCreateRequest>,
     ) -> Result<Vec<u64>, Error> {
+        Self::require_not_halted(&env)?;
         if requests.is_empty() {
             return Err(Error::EmptyBatch);
         }

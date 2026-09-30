@@ -99,6 +99,7 @@ const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
     ("create_stream_with_curve", "sender"),
     ("create_stream_with_cliff_mode", "sender"),
+    ("batch_create", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("batch_cancel", "sender"),
@@ -131,6 +132,7 @@ const AUTH: &[(&str, &str)] = &[
     ("resume_contract", "operator"),
     ("halted", "none"),
     ("halt_operator", "none"),
+    ("upgradeable", "none"),
 ];
 
 fn auth_of(name: &str) -> &'static str {
