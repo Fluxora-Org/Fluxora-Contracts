@@ -480,6 +480,17 @@ jobs:
           test -s target/wasm32v1-none/release/fluxora_factory.wasm
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_factory.wasm
 
+      - name: Generate ABI from optimized WASM
+        run: script/generate_abi.sh
+
+      - name: Upload ABI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora-stream-abi
+          path: contracts/stream/abi/fluxora_abi.json
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Compute WASM SHA256 hash
         run: |
           sha256sum target/wasm32v1-none/release/fluxora_stream.wasm > target/wasm32v1-none/release/fluxora_stream.wasm.sha256
