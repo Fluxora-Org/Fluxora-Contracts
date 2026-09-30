@@ -129,7 +129,7 @@ cannot be added without being threaded through.
 Run them from the workspace root:
 
 ```bash
-cargo test --package fluxora-factory test_set_admin_same_ledger
+cargo test --package fluxora_factory test_set_admin_same_ledger
 cargo test --package fluxora-stream same_ledger
 cargo test --package fluxora-stream withdraw_cancel_same_ledger
 ```

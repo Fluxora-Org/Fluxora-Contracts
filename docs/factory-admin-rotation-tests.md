@@ -105,13 +105,13 @@ Despite the correct implementation, these tests are valuable because they:
 From the workspace root:
 
 ```bash
-cargo test --package fluxora-factory test_set_admin_same_ledger
+cargo test --package fluxora_factory test_set_admin_same_ledger
 ```
 
 Or run all factory setter tests:
 
 ```bash
-cargo test --package fluxora-factory factory_setters
+cargo test --package fluxora_factory factory_setters
 ```
 
 ## Acceptance Criteria Met

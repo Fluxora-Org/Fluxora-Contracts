@@ -167,7 +167,7 @@ function parseClippyDiagnostics(stderr) {
     // Package = first two path segments for workspace packages, else "root".
     let pkg = "workspace-root";
     if (d.file.startsWith("contracts/stream/")) pkg = "fluxora-stream";
-    else if (d.file.startsWith("contracts/factory/")) pkg = "fluxora-factory";
+    else if (d.file.startsWith("contracts/factory/")) pkg = "fluxora_factory";
     else if (d.file.startsWith("contracts/archival-probe/"))
       pkg = "archival-probe";
     else if (d.file.startsWith("tools/provenance/")) pkg = "provenance";

@@ -590,12 +590,12 @@ jobs:
           echo "$meta" | python3 -c '
           import json, sys
           packages = json.load(sys.stdin)["packages"]
-          factory = next((p for p in packages if p["name"] == "fluxora-factory"), None)
+          factory = next((p for p in packages if p["name"] == "fluxora_factory"), None)
           if factory is None:
-              raise SystemExit("fluxora-factory is missing from the workspace")
+              raise SystemExit("fluxora_factory is missing from the workspace")
           if not any("cdylib" in target["kind"] for target in factory["targets"]):
-              raise SystemExit("fluxora-factory has no cdylib target")
-          print("fluxora-factory package and cdylib target verified")
+              raise SystemExit("fluxora_factory has no cdylib target")
+          print("fluxora_factory package and cdylib target verified")
           '
 
   fuzz-feature-matrix:
@@ -806,7 +806,7 @@ jobs:
       # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
       - name: Factory discriminant-stability tests
         if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora-factory
+        run: cargo test -p fluxora_factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
@@ -961,7 +961,7 @@ jobs:
             --ignore-tests \
             --skip-clean \
             --timeout 300 \
-            -p fluxora-factory
+            -p fluxora_factory
 
       - name: Enforce committed factory coverage floor
         run: |
