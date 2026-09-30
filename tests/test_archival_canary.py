@@ -13,8 +13,7 @@ else: a script that invoked the wrong contract method, or that computed
 
 So this module runs the script for real, against stubbed network boundaries:
 
-* a fake `curl` answering the `getLatestLedger` JSON-RPC call with a chosen
-  ledger sequence — that is the only network input the status path needs;
+* a fake `python3` RPC reader returning a chosen ledger-entry snapshot;
 * a fake `stellar` that fails, standing in for the CLI reporting an archived
   entry, so the archived branch runs too.
 
@@ -29,16 +28,30 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 SCRIPT = Path("script/archival-canary.sh")
 
 
-def test_archival_canary_dry_run():
+@pytest.fixture
+def runnable_bash():
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is unavailable")
+    result = subprocess.run([bash, "--version"], capture_output=True, text=True)
+    if result.returncode != 0:
+        pytest.skip(f"Bash is installed but not runnable: {result.stderr.strip()}")
+    return bash
+
+
+def test_archival_canary_dry_run(runnable_bash):
     """Ensure the archival canary script is structurally valid bash."""
     assert SCRIPT.exists(), f"{SCRIPT} not found"
-    result = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
+    result = subprocess.run([runnable_bash, "-n", str(SCRIPT)], capture_output=True, text=True)
     assert result.returncode == 0, f"Bash syntax check failed: {result.stderr}"
 
 
@@ -70,9 +83,9 @@ def test_archival_canary_asserts_the_recorded_outcome():
     assert "needs an archived entry" in text
 
 
-def test_archival_canary_rejects_unknown_arguments():
+def test_archival_canary_rejects_unknown_arguments(runnable_bash):
     result = subprocess.run(
-        ["bash", str(SCRIPT), "--nonsense"], capture_output=True, text=True
+        [runnable_bash, str(SCRIPT), "--nonsense"], capture_output=True, text=True
     )
     assert result.returncode == 2
     assert "unknown argument" in result.stderr
@@ -122,19 +135,27 @@ def write_shim(directory: Path, name: str, body: str) -> None:
 
 @pytest.fixture
 def stub_bin(tmp_path: Path):
-    """A directory of fake `curl` / `stellar` binaries, ready for PATH."""
+    """A directory of fake `python3` / `stellar` binaries, ready for PATH."""
 
-    def build(*, latest_ledger: int, stellar_exit: int = 0) -> Path:
+    def build(
+        *, latest_ledger: int, live_until_ledger: int | None = None,
+        stellar_exit: int = 0,
+    ) -> Path:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir(exist_ok=True)
 
-        # `latest_ledger()` posts JSON-RPC and pipes the body into python3, so
-        # the stub only has to print a well-formed response.
+        # The script makes RPC calls through Python's urllib, not curl. Stub
+        # that boundary directly so these tests never depend on the live RPC.
+        live_until = live_until_ledger if live_until_ledger is not None else latest_ledger + 10
+        snapshot = bin_dir / "snapshot.txt"
+        snapshot.write_text(
+            f"{live_until} {int_constant('PLANTED_AT_LEDGER')} {latest_ledger} canary\n",
+            encoding="utf-8",
+        )
         write_shim(
             bin_dir,
-            "curl",
-            "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sequence\":%d}}'\n"
-            % latest_ledger,
+            "python3",
+            f'if [[ "${{1:-}}" == "-" ]]; then cat "{snapshot}"; else exec "{sys.executable}" "$@"; fi\n',
         )
         write_shim(
             bin_dir,
@@ -146,11 +167,11 @@ def stub_bin(tmp_path: Path):
     return build
 
 
-def run_canary(bin_dir: Path, *args: str) -> subprocess.CompletedProcess:
+def run_canary(bin_dir: Path, bash: str, *args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     return subprocess.run(
-        ["bash", str(SCRIPT), *args],
+        [bash, str(SCRIPT), *args],
         capture_output=True,
         text=True,
         env=env,
@@ -163,10 +184,10 @@ def run_canary(bin_dir: Path, *args: str) -> subprocess.CompletedProcess:
 # The script's documented invariants
 # ---------------------------------------------------------------------------
 
-def test_the_canary_script_exists_and_is_valid_bash():
+def test_the_canary_script_exists_and_is_valid_bash(runnable_bash):
     assert SCRIPT.exists(), f"{SCRIPT} not found"
     result = subprocess.run(
-        ["bash", "-n", str(SCRIPT)], capture_output=True, text=True
+        [runnable_bash, "-n", str(SCRIPT)], capture_output=True, text=True
     )
     assert result.returncode == 0, f"Bash syntax check failed: {result.stderr}"
 
@@ -220,44 +241,47 @@ def test_the_live_until_ledger_is_the_plant_time_plus_the_network_minimum():
 # Dry runs
 # ---------------------------------------------------------------------------
 
-def test_status_run_reports_alive_and_exits_zero(stub_bin):
+def test_status_run_reports_alive_and_exits_zero(stub_bin, runnable_bash):
     """The status path, offline: an entry still inside its window."""
     planted = int_constant("PLANTED_AT_LEDGER")
     bin_dir = stub_bin(latest_ledger=planted + 10)
 
-    result = run_canary(bin_dir)
+    result = run_canary(bin_dir, runnable_bash)
 
     assert result.returncode == 0, result.stderr
     assert "ALIVE" in result.stdout, result.stdout
-    assert "Not archived yet" in result.stdout
-    # The remaining figure is the difference to live-until, not the difference
-    # from plant time.
-    remaining = int_constant("LIVE_UNTIL_LEDGER") - (planted + 10)
+    assert "The entry has not been evicted" in result.stdout
+    remaining = (planted + 20) - (planted + 10)
     assert str(remaining) in result.stdout, (
         f"expected the remaining {remaining} ledgers in the banner:\n{result.stdout}"
     )
 
 
-def test_status_run_with_no_ledgers_left_flags_archival(stub_bin):
-    """The same run one ledger past the window: still no network writes."""
+def test_status_run_with_no_ledgers_left_reports_archived_entry(stub_bin, runnable_bash):
+    """An expired live-until entry is reported without submitting a transaction."""
+    live_until = int_constant("LIVE_UNTIL_LEDGER")
     bin_dir = stub_bin(
-        latest_ledger=int_constant("LIVE_UNTIL_LEDGER") + 1, stellar_exit=1
+        latest_ledger=live_until + 1,
+        live_until_ledger=live_until,
+        stellar_exit=1,
     )
 
-    result = run_canary(bin_dir)
+    result = run_canary(bin_dir, runnable_bash)
 
-    # The read fails, the invoke fails, and without --restore the script stops
-    # there and reports the round trip as pending rather than claiming success.
-    assert "PAST LIVE-UNTIL" in result.stdout, result.stdout
-    assert "read failed: the entry is archived" in result.stdout, result.stdout
-    assert "--restore" in result.stdout, result.stdout
+    assert result.returncode == 0, result.stderr
+    assert "ARCHIVED" in result.stdout, result.stdout
+    assert "value still served: canary" in result.stdout, result.stdout
+    assert "Status only" in result.stdout, result.stdout
 
 
-def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin):
+def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin, runnable_bash):
     """`--restore` is opt-in: a monitoring job must be able to run read-only."""
     calls = Path(os.environ.get("TMPDIR", "/tmp")) / "canary-stub-calls"
+    live_until = int_constant("LIVE_UNTIL_LEDGER")
     bin_dir = stub_bin(
-        latest_ledger=int_constant("LIVE_UNTIL_LEDGER") + 1, stellar_exit=1
+        latest_ledger=live_until + 1,
+        live_until_ledger=live_until,
+        stellar_exit=1,
     )
     # Log every `stellar` invocation so the restore step can be detected.
     write_shim(
@@ -267,7 +291,7 @@ def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin):
     )
     calls.unlink(missing_ok=True)
 
-    result = run_canary(bin_dir)
+    result = run_canary(bin_dir, runnable_bash)
 
     invocations = calls.read_text(encoding="utf-8") if calls.exists() else ""
     assert "restore" not in invocations, (
@@ -277,16 +301,18 @@ def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin):
     calls.unlink(missing_ok=True)
 
 
-def test_the_script_never_reports_success_before_the_read_back(stub_bin):
+def test_the_script_never_reports_success_before_the_read_back(stub_bin, runnable_bash):
     """The one claim that must never be made loosely.
 
     The banner "Round trip complete" may only appear after the read returns the
     planted value; the stubbed run stops before that, so it must be absent.
     """
     bin_dir = stub_bin(
-        latest_ledger=int_constant("LIVE_UNTIL_LEDGER") + 1, stellar_exit=1
+        latest_ledger=int_constant("LIVE_UNTIL_LEDGER") + 1,
+        live_until_ledger=int_constant("LIVE_UNTIL_LEDGER"),
+        stellar_exit=1,
     )
-    result = run_canary(bin_dir)
+    result = run_canary(bin_dir, runnable_bash)
 
     assert "Round trip complete" not in result.stdout, result.stdout
 
@@ -301,15 +327,10 @@ def test_the_script_requires_no_clone_and_no_local_state():
         )
 
 
-def test_stub_environment_is_actually_used(stub_bin):
-    """Guard on the harness itself: the stubs must shadow the real binaries.
-
-    Without this, a `curl` that happened to be installed would let the "offline"
-    tests reach the real RPC endpoint, and the assertions above would be
-    measuring the network rather than the script.
-    """
+def test_stub_environment_is_actually_used(stub_bin, runnable_bash):
+    """Guard that the Python RPC shim shadows the real interpreter call."""
     bin_dir = stub_bin(latest_ledger=123)
-    resolved = shutil.which("curl", path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    resolved = shutil.which("python3", path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     assert Path(resolved).parent == bin_dir, (
         f"the stub curl at {bin_dir} did not take precedence over {resolved}"
     )

@@ -552,19 +552,18 @@ the tolerated-surplus boundary.
 |---|---|---|
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
 | `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)` | sender | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream) |
 | `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_with_cliff_mode) |
 | `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)` | sender | `u64` stream id |
+| `batch_create(sender, requests: Vec<BatchCreateRequest>)` | sender | `Vec<u64>` stream ids |
 | `top_up(stream_id, amount)` | sender | — |
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
-| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
 | `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
+| `upgradeable()` | — | `bool` — always `false` for this deployment |
 
 `withdraw` with `amount = None` draws the full available balance.
 

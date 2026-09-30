@@ -4,6 +4,36 @@
   "upgrade_posture": "Immutable. This contract exposes no upgrade entry point and cannot be replaced in place. New functionality requires deploying a new contract and migrating state explicitly.",
   "functions": [
     {
+      "name": "batch_cancel",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "stream_ids",
+          "type": "Vec<u64>"
+        }
+      ],
+      "outputs": "Result<BatchCancelOutcome, Error>"
+    },
+    {
+      "name": "batch_create",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "requests",
+          "type": "Vec<BatchCreateRequest>"
+        }
+      ],
+      "outputs": "Result<Vec<u64>, Error>"
+    },
+    {
       "name": "batch_extend_ttl",
       "auth": "none",
       "inputs": [
@@ -83,6 +113,108 @@
         {
           "name": "transferable",
           "type": "bool"
+        }
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_with_cliff_mode",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "recipient",
+          "type": "Address"
+        },
+        {
+          "name": "token",
+          "type": "Address"
+        },
+        {
+          "name": "deposit",
+          "type": "i128"
+        },
+        {
+          "name": "start_time",
+          "type": "u64"
+        },
+        {
+          "name": "end_time",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_time",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_mode",
+          "type": "CliffMode"
+        },
+        {
+          "name": "cancellable",
+          "type": "bool"
+        },
+        {
+          "name": "pausable",
+          "type": "bool"
+        },
+        {
+          "name": "transferable",
+          "type": "bool"
+        }
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "create_stream_with_curve",
+      "auth": "sender",
+      "inputs": [
+        {
+          "name": "sender",
+          "type": "Address"
+        },
+        {
+          "name": "recipient",
+          "type": "Address"
+        },
+        {
+          "name": "token",
+          "type": "Address"
+        },
+        {
+          "name": "deposit",
+          "type": "i128"
+        },
+        {
+          "name": "start_time",
+          "type": "u64"
+        },
+        {
+          "name": "end_time",
+          "type": "u64"
+        },
+        {
+          "name": "cliff_time",
+          "type": "u64"
+        },
+        {
+          "name": "cancellable",
+          "type": "bool"
+        },
+        {
+          "name": "pausable",
+          "type": "bool"
+        },
+        {
+          "name": "transferable",
+          "type": "bool"
+        },
+        {
+          "name": "curve",
+          "type": "ReleaseCurve"
         }
       ],
       "outputs": "Result<u64, Error>"
@@ -239,6 +371,24 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "halt",
+      "auth": "operator",
+      "inputs": [],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "halt_operator",
+      "auth": "none",
+      "inputs": [],
+      "outputs": "Option<Address>"
+    },
+    {
+      "name": "halted",
+      "auth": "none",
+      "inputs": [],
+      "outputs": "bool"
+    },
+    {
       "name": "pause",
       "auth": "sender",
       "inputs": [
@@ -272,6 +422,12 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "resume_contract",
+      "auth": "operator",
+      "inputs": [],
+      "outputs": "Result<(), Error>"
+    },
+    {
       "name": "revoke_delegate",
       "auth": "grantor",
       "inputs": [
@@ -285,6 +441,17 @@
         },
         {
           "name": "delegate",
+          "type": "Address"
+        }
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
+      "name": "set_halt_operator",
+      "auth": "operator",
+      "inputs": [
+        {
+          "name": "operator",
           "type": "Address"
         }
       ],
@@ -338,6 +505,12 @@
       "outputs": "Result<(), Error>"
     },
     {
+      "name": "upgradeable",
+      "auth": "none",
+      "inputs": [],
+      "outputs": "bool"
+    },
+    {
       "name": "vested_of",
       "auth": "none",
       "inputs": [
@@ -373,161 +546,117 @@
         }
       ],
       "outputs": "Result<i128, Error>"
-    },
-    {
-      "name": "batch_cancel",
-      "auth": "sender",
-      "inputs": [
-        {
-          "name": "sender",
-          "type": "Address"
-        },
-        {
-          "name": "stream_ids",
-          "type": "Vec<u64>"
-        }
-      ],
-      "outputs": "Result<BatchCancelOutcome, Error>"
-    },
-    {
-      "name": "create_stream_with_curve",
-      "auth": "sender",
-      "inputs": [
-        {
-          "name": "sender",
-          "type": "Address"
-        },
-        {
-          "name": "recipient",
-          "type": "Address"
-        },
-        {
-          "name": "token",
-          "type": "Address"
-        },
-        {
-          "name": "deposit",
-          "type": "i128"
-        },
-        {
-          "name": "start_time",
-          "type": "u64"
-        },
-        {
-          "name": "end_time",
-          "type": "u64"
-        },
-        {
-          "name": "cliff_time",
-          "type": "u64"
-        },
-        {
-          "name": "cancellable",
-          "type": "bool"
-        },
-        {
-          "name": "pausable",
-          "type": "bool"
-        },
-        {
-          "name": "transferable",
-          "type": "bool"
-        },
-        {
-          "name": "curve",
-          "type": "ReleaseCurve"
-        }
-      ],
-      "outputs": "Result<u64, Error>"
-    },
-    {
-      "name": "create_stream_with_cliff_mode",
-      "auth": "sender",
-      "inputs": [
-        {
-          "name": "sender",
-          "type": "Address"
-        },
-        {
-          "name": "recipient",
-          "type": "Address"
-        },
-        {
-          "name": "token",
-          "type": "Address"
-        },
-        {
-          "name": "deposit",
-          "type": "i128"
-        },
-        {
-          "name": "start_time",
-          "type": "u64"
-        },
-        {
-          "name": "end_time",
-          "type": "u64"
-        },
-        {
-          "name": "cliff_time",
-          "type": "u64"
-        },
-        {
-          "name": "cliff_mode",
-          "type": "CliffMode"
-        },
-        {
-          "name": "cancellable",
-          "type": "bool"
-        },
-        {
-          "name": "pausable",
-          "type": "bool"
-        },
-        {
-          "name": "transferable",
-          "type": "bool"
-        }
-      ],
-      "outputs": "Result<u64, Error>"
-    },
-    {
-      "name": "halt",
-      "auth": "operator",
-      "inputs": [],
-      "outputs": "Result<(), Error>"
-    },
-    {
-      "name": "halt_operator",
-      "auth": "none",
-      "inputs": [],
-      "outputs": "Option<Address>"
-    },
-    {
-      "name": "halted",
-      "auth": "none",
-      "inputs": [],
-      "outputs": "bool"
-    },
-    {
-      "name": "resume_contract",
-      "auth": "operator",
-      "inputs": [],
-      "outputs": "Result<(), Error>"
-    },
-    {
-      "name": "set_halt_operator",
-      "auth": "operator",
-      "inputs": [
-        {
-          "name": "operator",
-          "type": "Address"
-        }
-      ],
-      "outputs": "Result<(), Error>"
     }
   ],
   "types": [
+    {
+      "name": "BatchCancelOutcome",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "refused_index",
+          "type": "Option<u32>"
+        },
+        {
+          "name": "refused_reason",
+          "type": "Option<u32>"
+        },
+        {
+          "name": "refunded",
+          "type": "i128"
+        }
+      ],
+      "cases": []
+    },
+    {
+      "name": "BatchCreateRequest",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "cancellable",
+          "type": "bool"
+        },
+        {
+          "name": "cliff_time",
+          "type": "u64"
+        },
+        {
+          "name": "deposit",
+          "type": "i128"
+        },
+        {
+          "name": "end_time",
+          "type": "u64"
+        },
+        {
+          "name": "pausable",
+          "type": "bool"
+        },
+        {
+          "name": "paused_at",
+          "type": "Option<u64>"
+        },
+        {
+          "name": "paused_total",
+          "type": "u64"
+        },
+        {
+          "name": "recipient",
+          "type": "Address"
+        },
+        {
+          "name": "start_time",
+          "type": "u64"
+        },
+        {
+          "name": "status",
+          "type": "StreamStatus"
+        },
+        {
+          "name": "token",
+          "type": "Address"
+        },
+        {
+          "name": "transferable",
+          "type": "bool"
+        }
+      ],
+      "cases": []
+    },
+    {
+      "name": "CliffMode",
+      "kind": "enum",
+      "fields": [],
+      "cases": [
+        {
+          "name": "Schedule",
+          "discriminant": 0
+        },
+        {
+          "name": "WallClock",
+          "discriminant": 1
+        }
+      ]
+    },
+    {
+      "name": "ReleaseCurve",
+      "kind": "enum",
+      "fields": [],
+      "cases": [
+        {
+          "name": "Linear",
+          "discriminant": 0
+        },
+        {
+          "name": "Step",
+          "discriminant": 1
+        },
+        {
+          "name": "FrontLoaded",
+          "discriminant": 2
+        }
+      ]
+    },
     {
       "name": "Stream",
       "kind": "struct",
@@ -621,12 +750,6 @@
           "discriminant": 3
         }
       ]
-    },
-    {
-      "name": "ReleaseCurve",
-      "kind": "enum",
-      "fields": [],
-      "cases": []
     }
   ]
 }

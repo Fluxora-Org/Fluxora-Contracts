@@ -256,10 +256,12 @@ def _extract_fn_name(cell: str) -> str | None:
 def parse_entrypoint_count_claim(doc: str) -> int | None:
     """Extract the v1 entrypoint count claim from MIGRATION.md.
 
-    Looks for text like "v1 exposes **16**" and returns the integer.
+    Looks for text like "v1 exposes **16**" or "current stream ABI exposes **26**".
     Returns None if no claim is found.
     """
-    match = re.search(r"v1 exposes.*?\*\*(\d+)\*\*", doc, re.DOTALL)
+    match = re.search(
+        r"(?:v1|current stream ABI) exposes.*?\*\*(\d+)\*\*", doc, re.DOTALL
+    )
     if match:
         return int(match.group(1))
     return None
