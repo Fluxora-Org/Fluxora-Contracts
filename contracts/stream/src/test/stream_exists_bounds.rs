@@ -33,7 +33,7 @@ use soroban_sdk::Event as _;
 
 use super::common::*;
 use crate::events::{Cancelled, StreamCreated, Withdrawn};
-use crate::{DataKey, Error, ReleaseCurve, CliffMode, StreamStatus};
+use crate::{CliffMode, DataKey, Error, ReleaseCurve, StreamStatus};
 
 /// The events the *stream* contract published during the last invocation.
 ///

@@ -62,13 +62,21 @@ impl PayoutTracker {
 }
 
 /// Assert that for every stream, total payouts never exceed the deposit.
-fn assert_payout_conservation(h: &Harness, trackers: &std::collections::HashMap<u64, PayoutTracker>, seed: u64, step: u32, context: &str) {
+fn assert_payout_conservation(
+    h: &Harness,
+    trackers: &std::collections::HashMap<u64, PayoutTracker>,
+    seed: u64,
+    step: u32,
+    context: &str,
+) {
     for id in 0..h.client.stream_count() {
         let stream = h.get(id);
-        let tracker = trackers.get(&id).expect("tracker must exist for every stream");
-        
+        let tracker = trackers
+            .get(&id)
+            .expect("tracker must exist for every stream");
+
         let total = tracker.total_payouts();
-        
+
         // The core property: total payouts cannot exceed the deposit
         assert!(
             total <= tracker.deposited,
@@ -80,7 +88,7 @@ fn assert_payout_conservation(h: &Harness, trackers: &std::collections::HashMap<
             tracker.refunded,
             tracker.reclaimed,
         );
-        
+
         // Also verify the contract's own `withdrawn` field matches our tracker
         assert_eq!(
             stream.withdrawn,
@@ -89,7 +97,7 @@ fn assert_payout_conservation(h: &Harness, trackers: &std::collections::HashMap<
             stream.withdrawn,
             tracker.withdrawn,
         );
-        
+
         // Conservation identity must also hold: vested + refundable == deposited
         let now = h.now();
         let vested = accrual::vested(&stream, now).expect("vested must not overflow");
@@ -118,8 +126,9 @@ fn extract_try<T, E>(result: Result<Result<T, E>, impl std::fmt::Debug>) -> Opti
 fn run_payout_sequence(seed: u64, steps: u32) {
     let h = Harness::new();
     let mut rng = Rng(seed);
-    let mut trackers: std::collections::HashMap<u64, PayoutTracker> = std::collections::HashMap::new();
-    
+    let mut trackers: std::collections::HashMap<u64, PayoutTracker> =
+        std::collections::HashMap::new();
+
     // Seed with one initial stream
     let start = h.now() + rng.below(10 * DAY);
     let duration = DAY + rng.below(5 * DAY);
@@ -127,26 +136,29 @@ fn run_payout_sequence(seed: u64, steps: u32) {
     let cliff = start; // no cliff for simplicity
     let deposit = duration as i128 * ONE; // 1 stroop/second minimum
     let id = h.create(deposit, start, end, cliff, true, true, true);
-    
-    trackers.insert(id, PayoutTracker {
-        deposited: deposit,
-        ..Default::default()
-    });
-    
+
+    trackers.insert(
+        id,
+        PayoutTracker {
+            deposited: deposit,
+            ..Default::default()
+        },
+    );
+
     assert_payout_conservation(&h, &trackers, seed, 0, "after create");
-    
+
     for step in 1..=steps {
         let count = h.client.stream_count();
         if count == 0 {
             break;
         }
-        
+
         let id = rng.below(count);
         let tracker = trackers.get_mut(&id).expect("tracker must exist");
-        
+
         // Snapshot vested before operation to check I3 (no vested regression)
         let vested_before = h.vested_snapshot();
-        
+
         // Apply a random lifecycle operation
         match rng.below(12) {
             0..=3 => {
@@ -200,14 +212,28 @@ fn run_payout_sequence(seed: u64, steps: u32) {
             10 => {
                 // Delegate withdraw
                 let recipient = h.get(id).recipient;
-                let _ = extract_try(h.client.try_grant_delegate(&id, &recipient, &h.other, &op::WITHDRAW, &None));
-                if let Some(payout) = extract_try(h.client.try_delegate_withdraw(&id, &h.other, &None)) {
+                let _ = extract_try(h.client.try_grant_delegate(
+                    &id,
+                    &recipient,
+                    &h.other,
+                    &op::WITHDRAW,
+                    &None,
+                ));
+                if let Some(payout) =
+                    extract_try(h.client.try_delegate_withdraw(&id, &h.other, &None))
+                {
                     tracker.withdrawn += payout;
                 }
             }
             _ => {
                 // Delegate cancel
-                let _ = extract_try(h.client.try_grant_delegate(&id, &h.sender, &h.other, &op::CANCEL, &None));
+                let _ = extract_try(h.client.try_grant_delegate(
+                    &id,
+                    &h.sender,
+                    &h.other,
+                    &op::CANCEL,
+                    &None,
+                ));
                 if extract_try(h.client.try_delegate_cancel(&id, &h.other)).is_some() {
                     let stream = h.get(id);
                     let refund = stream.deposited - stream.withdrawn;
@@ -216,17 +242,17 @@ fn run_payout_sequence(seed: u64, steps: u32) {
                 }
             }
         }
-        
+
         // Check invariants after operation
         let label = std::format!("seed {}, step {}", seed, step);
         h.assert_no_vested_regression(&vested_before, &label);
         assert_payout_conservation(&h, &trackers, seed, step, "after operation");
-        
+
         // Advance time between operations
         h.advance(1 + rng.below(20 * DAY));
         assert_payout_conservation(&h, &trackers, seed, step, "after advance");
     }
-    
+
     // Final check: also verify reclaim_dust doesn't break conservation
     for id in 0..h.client.stream_count() {
         let stream = h.get(id);
@@ -238,16 +264,16 @@ fn run_payout_sequence(seed: u64, steps: u32) {
             }
         }
     }
-    
+
     assert_payout_conservation(&h, &trackers, seed, steps, "final state after reclaim_dust");
-    
+
     // Additional verification: for each stream, the sum of all payout types
     // must exactly equal the original deposit minus any remaining balance
     for id in 0..h.client.stream_count() {
         let _stream = h.get(id);
         let tracker = trackers.get(&id).expect("tracker must exist");
         let total_payouts = tracker.total_payouts();
-        
+
         assert!(
             total_payouts <= tracker.deposited,
             "seed {seed} FINAL: stream {id} total payouts {} > deposited {}",
@@ -317,30 +343,34 @@ fn validation_guard_dependency() {
     // Fixed seed that produces a non-trivial sequence
     let seed = 0x1858_DEAD_BEEFu64;
     let _steps = 20;
-    
+
     let h = Harness::new();
     let mut rng = Rng(seed);
-    let mut trackers: std::collections::HashMap<u64, PayoutTracker> = std::collections::HashMap::new();
-    
+    let mut trackers: std::collections::HashMap<u64, PayoutTracker> =
+        std::collections::HashMap::new();
+
     // Create a stream with a known deposit
     let start = h.now();
     let duration = 100 * DAY;
     let deposit = duration as i128 * 2 * ONE; // 2 stroops/second
     let id = h.create(deposit, start, start + duration, start, true, true, true);
-    
-    trackers.insert(id, PayoutTracker {
-        deposited: deposit,
-        ..Default::default()
-    });
-    
+
+    trackers.insert(
+        id,
+        PayoutTracker {
+            deposited: deposit,
+            ..Default::default()
+        },
+    );
+
     // Advance to mid-schedule
     h.advance(50 * DAY);
-    
+
     // Do a partial withdrawal
     let amount = h.client.withdrawable_of(&id);
     let payout = extract_try(h.client.try_withdraw(&id, &Some(amount / 2))).unwrap_or(0);
     trackers.get_mut(&id).unwrap().withdrawn += payout;
-    
+
     // Cancel — this should refund the remainder
     extract_try(h.client.try_cancel(&id));
     let stream = h.get(id);
@@ -349,16 +379,16 @@ fn validation_guard_dependency() {
         tracker.refunded += stream.deposited - stream.withdrawn;
         tracker.withdrawn = stream.withdrawn;
     }
-    
+
     // Verify conservation holds
     assert_payout_conservation(&h, &trackers, seed, 0, "validation: after cancel");
-    
+
     // Now test reclaim_dust on a depleted stream
     let reclaimed = h.client.reclaim_dust(&id);
     trackers.get_mut(&id).unwrap().reclaimed += reclaimed;
-    
+
     assert_payout_conservation(&h, &trackers, seed, 1, "validation: after reclaim_dust");
-    
+
     // The validation test passes with guards in place.
     // To verify guard dependency, one would manually remove a guard
     // (e.g., in `withdraw` the check `if requested > available`) and

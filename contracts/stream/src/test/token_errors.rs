@@ -50,12 +50,12 @@
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
 use super::common::*;
-use crate::{Error, StreamStatus, ReleaseCurve, CliffMode};
 use crate::events::{StreamCreated, Withdrawn};
-use soroban_sdk::Event;
+use crate::{CliffMode, Error, ReleaseCurve, StreamStatus};
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ContractEventBody;
+use soroban_sdk::Event;
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, MuxedAddress, String,
 };
@@ -671,9 +671,7 @@ impl FeeOnTransferToken {
 
     /// Test-only: set the token decimals.
     pub fn set_decimals(env: Env, d: u32) {
-        env.storage()
-            .instance()
-            .set(&symbol_short!("decimals"), &d);
+        env.storage().instance().set(&symbol_short!("decimals"), &d);
     }
 
     fn fee_bps(env: &Env) -> u32 {
