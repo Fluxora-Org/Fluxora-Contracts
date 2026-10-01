@@ -23,6 +23,7 @@ mod error_discriminants;
 // Issue #1689 — every discriminant is produced by a public entry point or
 // listed in the frozen reserved allowlist.
 mod error_reachability;
+mod batch_extend_ttl_archived;
 
 // Issue #1818 — contract-level emergency halt: one-shot operator install,
 // halt/resume, and the "every mutating entry point is refused while reads
