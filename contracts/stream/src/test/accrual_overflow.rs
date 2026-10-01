@@ -416,14 +416,14 @@ fn contract_handles_maximum_deployable_timestamps_without_a_trap() {
 }
 
 /// `create_stream` must reject a deposit whose `deposit * duration` product
-/// would overflow accrual at near-maximum duration. The rejection happens
+/// would overflow accrual at the maximum supported duration. The rejection happens
 /// during validation, before any token moves, so it needs no extra funding and
 /// the failed attempt is a typed error — never a host trap from the transfer.
 #[test]
 fn contract_rejects_deposit_that_would_overflow_at_maximum_duration() {
     let h = Harness::new();
     let start = h.now();
-    let duration = u64::MAX >> 2; // a genuinely u64-scale duration
+    let duration = crate::MAX_STREAM_DURATION;
     let d = duration as i128;
 
     // Maximal deposit create_stream would ever accept for this duration.
