@@ -315,7 +315,7 @@ fn reported_seed_replays() {
 #[test]
 fn validation_guard_dependency() {
     // Fixed seed that produces a non-trivial sequence
-    let seed = 0x1858_VALIDATION_SEED_u64;
+    let seed = 0x1858_DEAD_BEEFu64;
     let _steps = 20;
     
     let h = Harness::new();
@@ -344,16 +344,18 @@ fn validation_guard_dependency() {
     // Cancel — this should refund the remainder
     extract_try(h.client.try_cancel(&id));
     let stream = h.get(id);
-    let tracker = trackers.get_mut(&id).unwrap();
-    tracker.refunded += stream.deposited - stream.withdrawn;
-    tracker.withdrawn = stream.withdrawn;
+    {
+        let tracker = trackers.get_mut(&id).unwrap();
+        tracker.refunded += stream.deposited - stream.withdrawn;
+        tracker.withdrawn = stream.withdrawn;
+    }
     
     // Verify conservation holds
     assert_payout_conservation(&h, &trackers, seed, 0, "validation: after cancel");
     
     // Now test reclaim_dust on a depleted stream
     let reclaimed = h.client.reclaim_dust(&id);
-    tracker.reclaimed += reclaimed;
+    trackers.get_mut(&id).unwrap().reclaimed += reclaimed;
     
     assert_payout_conservation(&h, &trackers, seed, 1, "validation: after reclaim_dust");
     
