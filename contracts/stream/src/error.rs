@@ -203,22 +203,80 @@ pub enum Error {
     /// what happens when an assumption cannot be checked at call time (a
     /// rebasing token).
     TokenAmountMismatch = 32,
-    /// A post-mutation check detected a decrease in the vested amount.
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    ///
+    /// A defensive guard on `pause`, `resume`, `top_up` and
+    /// `transfer_recipient`. `vested` is non-decreasing under every mutation
+    /// those four paths can make — pause/resume leave elapsed time unchanged,
+    /// `top_up` scales numerator and denominator together, and the recipient
+    /// is not an input to the formula — so no reachable call produces it.
+    /// The guard stays because the invariant it protects is load-bearing.
+    /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
-    /// A state-changing entry point was called while the contract is halted.
+
+    // --- Rebase detection ---
+    /// The pool's real token balance is short of the balance Fluxora has
+    /// accounted for.
+    ///
+    /// Fluxora keeps a per-token running total of the balance it expects to
+    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
+    /// payout and refund debits it — and reconciles that total against the
+    /// token's own `balance` at the end of every operation that moves pool
+    /// funds. A shortfall means the token changed balances outside a
+    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
+    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
+    /// invocation reverts instead of letting one recipient be paid out of
+    /// another's claim.
+    ///
+    /// A **surplus** is deliberately tolerated, never reported: a positive
+    /// rebase cannot cause an underpayment, and rejecting one would let any
+    /// third party freeze every withdrawal by dusting the contract with a
+    /// single unit. See `docs/ABI.md` "Token assumptions" and
+    /// `test::rebase_drift`.
+    PoolBalanceDrift = 39,
+    // --- Contract-level emergency halt (#1818) ---
+    /// A state-changing entry point was called while the contract-level halt
+    /// is engaged.
+    ///
+    /// Only mutations are refused: every read method (`get_stream`,
+    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
+    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
+    /// integrators can still observe the chain during an incident.
     ContractHalted = 34,
-    /// The one-time halt operator has already been installed.
+    /// `set_halt_operator` was called after an operator was already installed.
+    ///
+    /// The setter is deliberately one-shot: there is no rotation entry point,
+    /// so a compromised operator cannot be replaced — it can only be halted by
+    /// deploying a new contract.
     HaltOperatorAlreadySet = 35,
-    /// `halt` or `resume_contract` was called before an operator was installed.
+    /// `halt` or `resume_contract` was called on a contract that has never had
+    /// a halt operator installed.
+    ///
+    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
+    /// has no operator and no way to engage it.
     HaltOperatorNotSet = 36,
     /// `halt` was called while the contract was already halted.
     ContractAlreadyHalted = 37,
     /// `resume_contract` was called while the contract was not halted.
+    ///
+    /// There is no timeout on the halt, so this is the only way a resume can
+    /// be a no-op.
     ContractNotHalted = 38,
-    /// The token pool balance is below the total Fluxora accounts for.
-    PoolBalanceDrift = 39,
-    /// Reference string exceeds maximum allowed length.
-    InvalidReferenceLength = 40,
-    /// A stream already has `MAX_DELEGATES_PER_STREAM` distinct delegate grants.
-    TooManyDelegates = 41,
+
+    // --- Factory policy ---
+    /// `create_stream_via_factory` was called while the factory's creation
+    /// pause is engaged. The factory admin must unpause before new
+    /// factory-routed streams are accepted.
+    FactoryPaused = 41,
+    /// The deposit exceeds the factory's configured `max_deposit` cap.
+    DepositExceedsCap = 42,
+    /// The stream duration is shorter than the factory's `min_duration` floor.
+    DurationBelowMinimum = 43,
+    /// The token is not on the factory's allowlist.
+    TokenNotAllowlisted = 44,
+    /// The per-second rate is below the factory's `min_rate_per_second` bound.
+    RateBelowMin = 45,
+    /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
+    RateAboveMax = 46,
 }

@@ -85,6 +85,29 @@ discriminant and event is generated from that same spec XDR and committed at
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
 
+**Regenerating the committed ABI file.** After adding or removing an entry
+point, regenerate `contracts/stream/abi/fluxora_stream.json` and update this
+document:
+
+```bash
+# Full regeneration from the built WASM (authoritative — includes full types):
+stellar contract info interface \
+  --wasm target/wasm32v1-none/release/fluxora_stream.wasm \
+  --output json > contracts/stream/abi/fluxora_stream.json
+
+# Quick structural sync from lib.rs (updates the function-name list only;
+# use when the WASM is not yet built or for a fast sanity check):
+python3 script/check-abi-drift.py --regenerate
+
+# Verify the committed file is in sync (run by CI on every push):
+python3 script/check-abi-drift.py
+```
+
+CI runs `python3 script/check-abi-drift.py` on every push and pull request
+(the `ABI drift check` step in the `docs-alignment-check` job). A difference
+between the committed JSON and the entry-point surface of `lib.rs`, or a
+function in the JSON that is not mentioned in this document, fails the build.
+
 ### ABI versions
 
 | version | scope                                                                                                                                                                      |
@@ -549,25 +572,36 @@ the tolerated-surplus boundary.
 
 ### Lifecycle
 
-| function                                                                                                                                              | auth                | returns                                                                    |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------- | -------------------------------------------------------------------------- |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)`                             | sender              | `u64` stream id                                                            |
-| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)`           | sender              | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)`                             | sender              | `u64` stream id — [details](#create_stream)                                |
-| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender              | `u64` stream id — [details](#create_stream_with_cliff_mode)                |
-| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)`                  | sender              | `u64` stream id                                                            |
-| `top_up(stream_id, amount)`                                                                                                                           | sender              | —                                                                          |
-| `withdraw(stream_id, amount: Option<i128>)`                                                                                                           | recipient           | `i128` paid                                                                |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)`                                                                                                     | recipient           | `i128` total — [details](#batch_withdraw)                                  |
-| `withdraw(stream_id, amount: Option<i128>)`                                                                                                           | recipient           | `i128` paid — [details](#withdraw)                                         |
-| `batch_withdraw(recipient, stream_ids: Vec<u64>)`                                                                                                     | recipient           | `i128` total                                                               |
-| `cancel(stream_id)`                                                                                                                                   | sender              | —                                                                          |
-| `batch_cancel(sender, stream_ids: Vec<u64>)`                                                                                                          | sender              | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64)    |
-| `pause(stream_id)` / `resume(stream_id)`                                                                                                              | sender              | —                                                                          |
-| `transfer_recipient(stream_id, new_recipient)`                                                                                                        | recipient           | —                                                                          |
-| `revoke_delegate(stream_id, grantor, delegate)`                                                                                                       | sender or recipient | —                                                                          |
+| function | auth | returns |
+|---|---|---|
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id |
+| `create_stream_with_curve(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, curve)` | sender | `u64` stream id — [details](#create_stream_with_curve--detailed-reference) |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream) |
+| `create_stream_with_cliff_mode(sender, recipient, token, deposit, start_time, end_time, cliff_time, cliff_mode, cancellable, pausable, transferable)` | sender | `u64` stream id — [details](#create_stream_with_cliff_mode) |
+| `create_stream(sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable, reference)` | sender | `u64` stream id |
+| `top_up(stream_id, amount)` | sender | — |
+| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid |
+| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total — [details](#batch_withdraw) |
+| `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
+| `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
+| `cancel(stream_id)` | sender | — |
+| `reclaim_dust(stream_id)` | sender | `i128` recovered |
+| `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
+| `batch_create(sender, requests: Vec<BatchCreateRequest>)` | sender | `Vec<u64>` stream ids — creates up to `MAX_BATCH_SIZE` streams in one call |
+| `pause(stream_id)` / `resume(stream_id)` | sender | — |
+| `transfer_recipient(stream_id, new_recipient)` | recipient | — |
+| `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
+
+The sender owns any integer-token rounding residue left after settlement.
+`reclaim_dust` is sender-authorized and only transfers the refundable part of
+the outstanding liability; any amount still withdrawable by the recipient is
+reserved for them. It returns zero before a stream is terminal or when
+settlement leaves no sender residue. With the current proportional accrual
+formula, maturity vests the full deposit, so uneven deposit/duration pairs
+settle with zero residue; cancellation returns the unvested remainder at
+cancellation time.
 
 #### `pause(stream_id)` — freeze accrual and the cliff gate
 

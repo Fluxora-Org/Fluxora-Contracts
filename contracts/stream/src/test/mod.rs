@@ -43,6 +43,7 @@ mod withdraw_events;
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
 mod withdraw_exact_balance;
+mod settled_dust;
 
 // Stage 2
 mod auth;
@@ -57,6 +58,8 @@ mod cliff;
 // schedule-relative half (issue #1688); this is the opt-out that pausing
 // cannot move. See `docs/KNOWN-LIMITATIONS.md` §7.
 mod cliff_mode;
+// Issue #1824: `delegate_top_up` held to the rejection depth of `top_up`.
+mod delegate_top_up;
 mod delegation;
 // Issue #1729 — bound the number of distinct delegate grants per stream.
 mod delegate_cap;
@@ -72,6 +75,11 @@ mod delegate_expiry_boundary;
 // Issue #1734: comprehensive revoke_delegate coverage — per-bit, no-op on
 // never-issued grants, same-ledger effect, and multi-delegate isolation.
 mod revoke_delegate;
+// Issue #1880 — a delegate grant covering several permission bits permits
+// exactly those ops; revoking one bit leaves the others intact; clearing every
+// bit is equivalent to revoking; an ungrated op is rejected even when others
+// are present.
+mod delegate_multi_bit_grant;
 // Issue #1854: two delegates holding WITHDRAW on one stream settle in the
 // same ledger serialised by storage — no double settlement, funds conserved.
 mod delegate_concurrent_withdraw;
