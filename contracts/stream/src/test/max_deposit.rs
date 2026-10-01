@@ -27,7 +27,7 @@ use soroban_sdk::Event as _;
 
 use super::common::*;
 use crate::events::{StreamCreated, Withdrawn};
-use crate::{Error, StreamStatus};
+use crate::{Error, ReleaseCurve, CliffMode, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Fixture: the harness plus a token whose whole supply is `i128::MAX`

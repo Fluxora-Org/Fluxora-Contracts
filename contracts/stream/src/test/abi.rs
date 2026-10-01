@@ -36,6 +36,7 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
+use super::common::Harness;
 use crate::{
     BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
     ABI_VERSION,
@@ -290,10 +291,8 @@ fn event_from_spec(entry: ScSpecEntry) -> EventAbi {
 fn current_inventory() -> Inventory {
     let mut functions = vec![
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
-        function_from_spec(parse_spec(
-            &FluxoraStream::spec_xdr_create_stream_with_curve(),
-            &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
-        )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream_with_curve())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream_with_cliff_mode())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),

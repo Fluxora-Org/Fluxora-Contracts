@@ -50,7 +50,9 @@
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
 use super::common::*;
-use crate::{Error, StreamStatus};
+use crate::{Error, StreamStatus, ReleaseCurve, CliffMode};
+use crate::events::{StreamCreated, Withdrawn};
+use soroban_sdk::Event;
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ContractEventBody;
@@ -667,6 +669,13 @@ impl FeeOnTransferToken {
             .set(&symbol_short!("fee_bps"), &bps);
     }
 
+    /// Test-only: set the token decimals.
+    pub fn set_decimals(env: Env, d: u32) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("decimals"), &d);
+    }
+
     fn fee_bps(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -719,8 +728,11 @@ impl FeeOnTransferToken {
     }
     pub fn burn(_env: Env, _from: Address, _amount: i128) {}
     pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
-    pub fn decimals(_env: Env) -> u32 {
-        7
+    pub fn decimals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("decimals"))
+            .unwrap_or(7)
     }
     pub fn name(env: Env) -> String {
         String::from_str(&env, "FeeOnTransferToken")
@@ -1099,7 +1111,8 @@ fn token_amount_mismatch_discriminant_matches_the_abi_table() {
 #[test]
 fn create_stream_with_false_returning_token_is_rejected() {
     let h = Harness::new();
-    let (token, false_token) = register_false_token(&h);
+    let panic_token = register_panic_token(&h);
+    let client = soroban_sdk::token::TokenClient::new(&h.env, &panic_token);
 
     let start = h.now();
     let err = h
@@ -1107,7 +1120,7 @@ fn create_stream_with_false_returning_token_is_rejected() {
         .try_create_stream(
             &h.sender,
             &h.recipient,
-            &token,
+            &panic_token,
             &(1_000 * ONE),
             &start,
             &(start + 100 * DAY),
@@ -1124,12 +1137,12 @@ fn create_stream_with_false_returning_token_is_rejected() {
     assert_eq!(h.client.stream_count(), 0, "id counter must not advance");
     assert!(!h.client.stream_exists(&0), "no phantom entry at id 0");
     assert_eq!(
-        false_token.balance(&h.sender),
+        client.balance(&h.sender),
         10_000 * ONE,
         "failed transfer must not debit or credit the sender"
     );
     assert_eq!(
-        false_token.balance(&h.contract_id),
+        client.balance(&h.contract_id),
         0,
         "failed transfer must not grow the contract's pool"
     );
@@ -1185,6 +1198,9 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            curve: ReleaseCurve::Linear,
+            cliff_mode: CliffMode::Schedule,
+            reference: None,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "create event must report the unscaled raw deposit"

@@ -484,6 +484,7 @@ fn the_collapsed_transfer_call_is_gated_by_the_immutable_flag() {
         &true,
         &true,
         &false, // transferable
+        &None,
     );
 
     assert_eq!(
