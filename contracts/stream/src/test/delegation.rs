@@ -1132,6 +1132,38 @@ fn delegate_top_up_guards_terminal_invalid_matured_and_sub_second() {
     h.assert_pool_exact();
 }
 
+#[test]
+fn delegate_top_up_cannot_extend_a_maximum_duration_stream() {
+    let h = Harness::new();
+    let agent = Address::generate(&h.env);
+    let start = h.now();
+    let duration = crate::MAX_STREAM_DURATION;
+    let id = h.create(
+        duration as i128,
+        start,
+        start + duration,
+        start,
+        true,
+        true,
+        true,
+    );
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::TOP_UP, &None);
+
+    let stream_before = h.get(id);
+    let pool_before = h.pool();
+    let err = h
+        .client
+        .try_delegate_top_up(&id, &agent, &1)
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::DurationTooLong);
+    assert_eq!(h.get(id), stream_before);
+    assert_eq!(h.pool(), pool_before);
+    h.assert_pool_exact();
+}
+
 // ---------------------------------------------------------------------------
 // `delegate_transfer_recipient` — parity with the direct `transfer_recipient`
 // (Issue #1827)

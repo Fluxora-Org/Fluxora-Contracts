@@ -107,6 +107,10 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("ContractNotHalted", 38),
     // --- Rebase detection ---
     ("PoolBalanceDrift", 39),
+    // --- Creation validation ---
+    ("InvalidReferenceLength", 40),
+    // --- Duration limits ---
+    ("DurationTooLong", 41),
     // --- Reference validation ---
     ("InvalidReferenceLength", 40),
     // --- Factory policy ---
@@ -122,7 +126,7 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 46;
+const LAST_DISCRIMINANT: u32 = 41;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -197,7 +201,6 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
-        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
         ("ContractHalted", Error::ContractHalted as u32),
         (
             "HaltOperatorAlreadySet",
@@ -206,6 +209,12 @@ fn discriminant_fixture_matches_source() {
         ("HaltOperatorNotSet", Error::HaltOperatorNotSet as u32),
         ("ContractAlreadyHalted", Error::ContractAlreadyHalted as u32),
         ("ContractNotHalted", Error::ContractNotHalted as u32),
+        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
+        (
+            "InvalidReferenceLength",
+            Error::InvalidReferenceLength as u32,
+        ),
+        ("DurationTooLong", Error::DurationTooLong as u32),
     ];
 
     assert_eq!(

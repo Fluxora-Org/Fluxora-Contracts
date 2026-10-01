@@ -5,8 +5,11 @@ not assumed (#1806), with a 20% safety margin covering drift. These tests keep
 the documented story tied to the script and source that back it.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -24,8 +27,14 @@ class TestMeasurementScript:
         assert MEASURE_SCRIPT.exists(), f"{MEASURE_SCRIPT} not found"
 
     def test_script_is_valid_bash(self):
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("Bash is unavailable")
+        version = subprocess.run([bash, "--version"], capture_output=True, text=True)
+        if version.returncode != 0:
+            pytest.skip(f"Bash is installed but not runnable: {version.stderr.strip()}")
         result = subprocess.run(
-            ["bash", "-n", str(MEASURE_SCRIPT)], capture_output=True, text=True
+            [bash, "-n", str(MEASURE_SCRIPT)], capture_output=True, text=True
         )
         assert result.returncode == 0, f"Bash syntax check failed: {result.stderr}"
 

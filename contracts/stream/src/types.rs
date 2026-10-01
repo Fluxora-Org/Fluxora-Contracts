@@ -6,6 +6,9 @@ use soroban_sdk::{contracttype, Address, String};
 /// short identifiers like "payroll-001" or "grant-xyz-q1-2024".
 pub const MAX_REFERENCE_LENGTH: u32 = 64;
 
+/// Maximum scheduled stream duration: 100 years of 365 days, in seconds.
+pub const MAX_STREAM_DURATION: u64 = 100 * 365 * 24 * 60 * 60;
+
 /// Bitmask constants for which operations a delegate is permitted to perform.
 ///
 /// Pass one constant or OR several together when calling [`crate::FluxoraStream::grant_delegate`].

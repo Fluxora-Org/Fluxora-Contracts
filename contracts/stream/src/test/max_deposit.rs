@@ -124,6 +124,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         cancellable: true,
         pausable: true,
         transferable: true,
+        curve: crate::ReleaseCurve::Linear,
+        cliff_mode: crate::CliffMode::Schedule,
+        reference: None,
     };
     assert_eq!(
         created,
@@ -181,6 +184,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         withdrawn: deposit,
         deposited: deposit,
         status: StreamStatus::Depleted,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     assert_eq!(
         drained,

@@ -6,9 +6,9 @@ from script import validate_gas
 from script.validate_gas import compare, entrypoints, parse_measurements
 
 
-def test_inventory_is_all_33_abi_entries():
+def test_inventory_is_all_34_abi_entries():
     names = entrypoints()
-    assert len(names) == 33
+    assert len(names) == 34
     assert {
         "withdraw",
         "batch_withdraw",

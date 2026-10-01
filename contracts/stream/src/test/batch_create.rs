@@ -2,7 +2,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Vec};
 
 use super::common::*;
-use crate::{BatchCreateRequest, Error, MAX_BATCH_SIZE};
+use crate::{BatchCreateRequest, Error, MAX_BATCH_SIZE, MAX_STREAM_DURATION};
 
 fn request(h: &Harness, recipient: Address) -> BatchCreateRequest {
     let start = h.now();
@@ -16,6 +16,9 @@ fn request(h: &Harness, recipient: Address) -> BatchCreateRequest {
         cancellable: true,
         pausable: true,
         transferable: true,
+        paused_at: None,
+        paused_total: 0,
+        status: crate::StreamStatus::Active,
     }
 }
 
@@ -49,6 +52,25 @@ fn invalid_element_does_not_create_any_stream() {
         Err(Ok(Error::InvalidTimeRange))
     );
     assert_eq!(h.client.stream_count(), 0);
+}
+
+#[test]
+fn duration_above_maximum_rejects_the_whole_batch() {
+    let h = Harness::new();
+    let mut requests = Vec::new(&h.env);
+    requests.push_back(request(&h, Address::generate(&h.env)));
+    let mut over_limit = request(&h, Address::generate(&h.env));
+    over_limit.end_time = over_limit.start_time + MAX_STREAM_DURATION + 1;
+    over_limit.deposit = (MAX_STREAM_DURATION + 1) as i128;
+    requests.push_back(over_limit);
+
+    let pool_before = h.pool();
+    assert_eq!(
+        h.client.try_batch_create(&h.sender, &requests),
+        Err(Ok(Error::DurationTooLong))
+    );
+    assert_eq!(h.client.stream_count(), 0);
+    assert_eq!(h.pool(), pool_before);
 }
 
 #[test]

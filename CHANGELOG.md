@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `reference` parameter in `create_stream` function (Option<String>)
   - Maximum reference length of 64 characters (`MAX_REFERENCE_LENGTH` constant)
   - Reference field included in `StreamCreated` events and returned by `get_stream`
-  - New `InvalidReferenceLength` (34) error for references exceeding maximum length
+  - New `InvalidReferenceLength` (40) error for references exceeding maximum length
   - Comprehensive validation tests for empty, valid, maximum-length, and over-length references
   - Storage cost analysis documentation showing 1-73 byte overhead depending on reference length
 

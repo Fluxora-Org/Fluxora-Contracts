@@ -59,7 +59,7 @@
 use std::format;
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::Env;
 
 use crate::types::{CliffMode, DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
@@ -517,6 +517,7 @@ fn deterministic_stream(env: &Env) -> Stream {
         paused_total: 0,
         status: StreamStatus::Active,
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 
@@ -862,7 +863,7 @@ fn v1_layout_is_no_longer_decodable_and_that_is_deliberate() {
         .collect();
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
-    let decoded =
+    let _decoded =
         StreamRecord::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
     // Note the failure mode: this is not a clean `Err`. Decoding a `Stream` that
     // is 14 fields long against a 15-field reader fails inside the host while
@@ -913,6 +914,8 @@ fn v2_layout_round_trips() {
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve: ReleaseCurve::Linear,
+        reference: None,
     };
 
     let bytes = stream.to_xdr(&env);
@@ -926,10 +929,9 @@ fn v2_layout_round_trips() {
 
     // No side-car in a v1 entry, so the stream is linear and vests exactly as
     // it always did.
-    let stream = decoded.into_stream(ReleaseCurve::Linear);
-    assert_eq!(stream.curve, ReleaseCurve::Linear);
-    assert_eq!(stream.deposited, 1_000_000_000_000);
-    assert_eq!(stream.end_time, 1_731_536_000);
+    assert_eq!(decoded.curve, ReleaseCurve::Linear);
+    assert_eq!(decoded.deposited, 1_000_000_000_000);
+    assert_eq!(decoded.end_time, 1_731_536_000);
 }
 
 /// **The negative half of the fixture guard.** `Stream` grew a `curve` field in

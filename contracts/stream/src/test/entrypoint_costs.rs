@@ -56,6 +56,10 @@ fn entrypoint_cost_snapshot() {
     h.create_simple(1_000 * ONE, 100 * DAY);
     record(&h, "create_stream");
 
+    let h = wasm_harness();
+    assert!(!h.client.upgradeable());
+    record(&h, "upgradeable");
+
     // Issue #1815 — the curve-carrying creation path.
     let h = wasm_harness();
     let start = h.now();
@@ -87,6 +91,9 @@ fn entrypoint_cost_snapshot() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            paused_at: None,
+            paused_total: 0,
+            status: crate::StreamStatus::Active,
         });
     }
     h.client.batch_create(&h.sender, &requests);

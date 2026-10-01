@@ -246,10 +246,8 @@ class TestParseRenamesTable:
 class TestParseEntrypointCountClaim:
     def test_extracts_v1_count(self, real_doc):
         count = vm.parse_entrypoint_count_claim(real_doc)
-        # 16 after the v1 rewrite, 17 once `create_stream_with_curve` (#1815)
-        # was added to the core surface.
-        assert count == 21
-        assert count == 17
+        # The current ABI has 26 core methods plus 8 delegation methods.
+        assert count == 26
 
     def test_returns_none_when_absent(self):
         assert vm.parse_entrypoint_count_claim("# No counts here") is None

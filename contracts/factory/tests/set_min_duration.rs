@@ -36,7 +36,7 @@ fn assert_auth_fails<F: FnOnce()>(f: F) {
 
 /// Initialise a factory and return the pieces every test needs.
 fn init_factory(env: &Env) -> (Address, FluxoraFactoryClient<'static>, Address, Address) {
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(env, &fid);
     let admin = Address::generate(env);
     let sc = Address::generate(env);
@@ -71,7 +71,7 @@ fn test_set_min_duration_round_trips_through_get_factory_config() {
 #[test]
 fn test_set_min_duration_follows_admin_rotation() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let old_admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -136,7 +136,7 @@ fn test_set_min_duration_follows_admin_rotation() {
 #[test]
 fn test_set_min_duration_rejects_non_admin_and_leaves_the_duration_untouched() {
     let env = Env::default();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let non_admin = Address::generate(&env);
@@ -173,7 +173,7 @@ fn test_set_min_duration_rejects_non_admin_and_leaves_the_duration_untouched() {
 fn test_set_min_duration_before_init_returns_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let fid = env.register_contract(None, FluxoraFactory);
+    let fid = env.register(FluxoraFactory, ());
     let factory = FluxoraFactoryClient::new(&env, &fid);
 
     assert_eq!(

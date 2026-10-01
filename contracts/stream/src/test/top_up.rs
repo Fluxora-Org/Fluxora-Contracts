@@ -31,6 +31,30 @@ fn top_up_extends_the_end_date_at_the_same_rate() {
     h.assert_pool_exact();
 }
 
+#[test]
+fn top_up_cannot_extend_a_maximum_duration_stream() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = crate::MAX_STREAM_DURATION;
+    let id = h.create(
+        duration as i128 + 1,
+        start,
+        start + duration,
+        start,
+        true,
+        true,
+        true,
+    );
+    let pool_before = h.pool();
+
+    let err = h.client.try_top_up(&id, &2).unwrap_err().unwrap();
+
+    assert_eq!(err, Error::DurationTooLong);
+    assert_eq!(h.get(id).end_time, start + duration);
+    assert_eq!(h.get(id).deposited, duration as i128 + 1);
+    assert_eq!(h.pool(), pool_before);
+}
+
 /// The defining property: a top-up must not change what is already withdrawable.
 #[test]
 fn top_up_does_not_retroactively_vest_elapsed_time() {
@@ -546,20 +570,14 @@ fn top_up_computing_one_second_delta_is_accepted() {
 fn top_up_overflow_on_end_time_addition_is_rejected() {
     let h = Harness::new();
 
-    // Create a stream ending near u64::MAX.
-    let start = 1_000_000u64;
-    let end = u64::MAX - 100; // Leave room for delta
-    let id = h.create(100_000, start, end, start, true, true, true);
+    // Use the maximum valid schedule, ending 100 seconds below u64::MAX.
+    let duration = crate::MAX_STREAM_DURATION;
+    let end = u64::MAX - 100;
+    let start = end - duration;
+    let id = h.create(duration as i128, start, end, start, true, true, true);
 
-    // Top-up with an amount that would compute a huge delta.
-    // delta = amount * duration / deposited
-    // duration = u64::MAX - 100 - 1_000_000 = u64::MAX - 1_000_100 (large)
-    // If amount is large enough, delta could exceed u64::MAX - end.
-    let err = h
-        .client
-        .try_top_up(&id, &(i128::MAX / 2))
-        .unwrap_err()
-        .unwrap();
+    // At one stroop per second, a 101-stroop top-up extends by 101 seconds.
+    let err = h.client.try_top_up(&id, &101).unwrap_err().unwrap();
     assert_eq!(err, Error::Overflow);
 
     // Stream is unchanged.

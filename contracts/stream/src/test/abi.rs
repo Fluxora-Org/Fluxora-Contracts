@@ -36,6 +36,10 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
+use crate::test::common::Harness;
+use crate::{
+    BatchCancelOutcome, BatchCreateRequest, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream,
+    StreamStatus, ABI_VERSION, UPGRADEABLE,
 use crate::{
     BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
     ABI_VERSION,
@@ -98,6 +102,7 @@ const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
     ("create_stream_with_curve", "sender"),
     ("create_stream_with_cliff_mode", "sender"),
+    ("batch_create", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("reclaim_dust", "sender"),
@@ -131,6 +136,7 @@ const AUTH: &[(&str, &str)] = &[
     ("resume_contract", "operator"),
     ("halted", "none"),
     ("halt_operator", "none"),
+    ("upgradeable", "none"),
 ];
 
 fn auth_of(name: &str) -> &'static str {
@@ -292,8 +298,11 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
+        function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_create())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),
@@ -326,11 +335,13 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_resume_contract())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halted())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt_operator())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_upgradeable())),
     ];
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut types = vec![
         type_from_spec(parse_spec(&BatchCancelOutcome::spec_xdr())),
+        type_from_spec(parse_spec(&BatchCreateRequest::spec_xdr())),
         type_from_spec(parse_spec(&Stream::spec_xdr())),
         type_from_spec(parse_spec(&StreamStatus::spec_xdr())),
         type_from_spec(parse_spec(&ReleaseCurve::spec_xdr())),
@@ -966,6 +977,8 @@ fn render_json(inv: &Inventory) -> String {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(&format!("  \"abi_version\": {},\n", inv.abi_version));
+    out.push_str(&format!("  \"upgradeable\": {},\n", UPGRADEABLE));
+    out.push_str("  \"upgrade_posture\": \"Immutable. This contract exposes no upgrade entry point and cannot be replaced in place. New functionality requires deploying a new contract and migrating state explicitly.\",\n");
     out.push_str("  \"functions\": [\n");
     for (i, f) in inv.functions.iter().enumerate() {
         out.push_str("    {\n");

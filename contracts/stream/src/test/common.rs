@@ -218,7 +218,8 @@ impl<'a> Harness<'a> {
         self.env.ledger().set_timestamp(info.timestamp + seconds);
         let ledgers = seconds
             .saturating_add(storage::SECONDS_PER_LEDGER - 1)
-            .saturating_div(storage::SECONDS_PER_LEDGER);
+            .saturating_div(storage::SECONDS_PER_LEDGER)
+            .min(u32::MAX as u64) as u32;
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));

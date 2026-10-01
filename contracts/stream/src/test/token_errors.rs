@@ -50,12 +50,14 @@
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
 use super::common::*;
+use crate::events::{StreamCreated, Withdrawn};
 use crate::{Error, StreamStatus};
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::xdr::ContractEventBody;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, MuxedAddress, String,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Event as _, MuxedAddress,
+    String,
 };
 
 // ─── panic token ─────────────────────────────────────────────────────────────
@@ -118,6 +120,36 @@ impl PanicToken {
 
 fn register_panic_token(h: &Harness) -> Address {
     h.env.register(PanicToken, ())
+}
+
+#[contract]
+pub struct FalseToken;
+
+#[contractimpl]
+impl FalseToken {
+    pub fn mint(env: Env, to: Address, amount: i128) {
+        let balance = Self::balance_of(&env, &to);
+        env.storage().instance().set(&to, &(balance + amount));
+    }
+
+    pub fn transfer(_env: Env, _from: Address, _to: MuxedAddress, _amount: i128) -> bool {
+        false
+    }
+
+    pub fn balance(env: Env, id: Address) -> i128 {
+        Self::balance_of(&env, &id)
+    }
+
+    fn balance_of(env: &Env, id: &Address) -> i128 {
+        env.storage().instance().get(id).unwrap_or(0)
+    }
+}
+
+fn register_false_token<'a>(h: &'a Harness<'a>) -> (Address, FalseTokenClient<'a>) {
+    let token = h.env.register(FalseToken, ());
+    let client = FalseTokenClient::new(&h.env, &token);
+    client.mint(&h.sender, &(10_000 * ONE));
+    (token, client)
 }
 
 #[contract]
@@ -667,6 +699,12 @@ impl FeeOnTransferToken {
             .set(&symbol_short!("fee_bps"), &bps);
     }
 
+    pub fn set_decimals(env: Env, decimals: u32) {
+        env.storage()
+            .instance()
+            .set(&symbol_short!("decimals"), &decimals);
+    }
+
     fn fee_bps(env: &Env) -> u32 {
         env.storage()
             .instance()
@@ -720,7 +758,10 @@ impl FeeOnTransferToken {
     pub fn burn(_env: Env, _from: Address, _amount: i128) {}
     pub fn burn_from(_env: Env, _spender: Address, _from: Address, _amount: i128) {}
     pub fn decimals(_env: Env) -> u32 {
-        7
+        _env.storage()
+            .instance()
+            .get(&symbol_short!("decimals"))
+            .unwrap_or(7)
     }
     pub fn name(env: Env) -> String {
         String::from_str(&env, "FeeOnTransferToken")
@@ -1185,6 +1226,9 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            curve: crate::ReleaseCurve::Linear,
+            cliff_mode: crate::CliffMode::Schedule,
+            reference: None,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "create event must report the unscaled raw deposit"
@@ -1218,6 +1262,9 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
             withdrawn: deposit,
             deposited: deposit,
             status: StreamStatus::Depleted,
+            sender: h.sender.clone(),
+            paused_at: None,
+            paused_total: 0,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "withdrawal event must report the same unscaled raw amount"

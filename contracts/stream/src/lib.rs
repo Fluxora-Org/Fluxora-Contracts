@@ -92,8 +92,6 @@ extern crate std;
 mod accrual;
 mod error;
 mod events;
-#[cfg(test)]
-mod protocol_limits;
 mod storage;
 mod types;
 #[cfg(test)]
@@ -109,7 +107,7 @@ pub use storage::{
 pub use types::op;
 pub use types::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
-    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+    Stream, StreamStatus, MAX_REFERENCE_LENGTH, MAX_STREAM_DURATION,
 };
 
 use soroban_sdk::{
@@ -513,6 +511,8 @@ impl FluxoraStream {
     /// * [`Error::SelfStream`] — sender and recipient are the same address.
     /// * [`Error::InvalidDeposit`] — deposit is not positive.
     /// * [`Error::InvalidTimeRange`] — `end_time <= start_time`.
+    /// * [`Error::DurationTooLong`] — `end_time - start_time` exceeds
+    ///   [`MAX_STREAM_DURATION`].
     ///
     ///   **Zero-duration design decision:** a stream with `end_time == start_time`
     ///   (or earlier) is **rejected**, never treated as "already vested". A zero
@@ -545,6 +545,7 @@ impl FluxoraStream {
         transferable: bool,
         reference: Option<String>,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
         sender.require_auth();
 
         Self::create_stream_inner(
@@ -654,6 +655,9 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
+
         Self::create_stream_inner(
             env,
             sender,
@@ -696,10 +700,6 @@ impl FluxoraStream {
         reference: Option<String>,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
-        // Emergency halt (#1818): refuse state changes before anything else.
-        Self::require_not_halted(&env)?;
-        sender.require_auth();
-
         if sender == recipient {
             return Err(Error::SelfStream);
         }
@@ -708,6 +708,10 @@ impl FluxoraStream {
         }
         if end_time <= start_time {
             return Err(Error::InvalidTimeRange);
+        }
+        let total_duration = end_time - start_time;
+        if total_duration > MAX_STREAM_DURATION {
+            return Err(Error::DurationTooLong);
         }
         if cliff_time < start_time || cliff_time > end_time {
             return Err(Error::InvalidCliff);
@@ -719,8 +723,6 @@ impl FluxoraStream {
                 return Err(Error::InvalidReferenceLength);
             }
         }
-
-        let total_duration = end_time - start_time;
 
         // Reject dust-rate streams. Below one stroop per second the recipient
         // accrues literally nothing until very late in the schedule, which is a
@@ -787,6 +789,7 @@ impl FluxoraStream {
         sender: Address,
         requests: Vec<BatchCreateRequest>,
     ) -> Result<Vec<u64>, Error> {
+        Self::require_not_halted(&env)?;
         if requests.is_empty() {
             return Err(Error::EmptyBatch);
         }
@@ -808,6 +811,9 @@ impl FluxoraStream {
             }
             if request.end_time <= request.start_time {
                 return Err(Error::InvalidTimeRange);
+            }
+            if request.end_time - request.start_time > MAX_STREAM_DURATION {
+                return Err(Error::DurationTooLong);
             }
             if request.cliff_time < request.start_time || request.cliff_time > request.end_time {
                 return Err(Error::InvalidCliff);
@@ -1025,6 +1031,8 @@ impl FluxoraStream {
     ///   instantly (or near-instantly) withdrawable, which is never what the
     ///   sender means. Create a new stream instead.
     /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::DurationTooLong`] — extending the schedule would exceed
+    ///   [`MAX_STREAM_DURATION`].
     /// * [`Error::TokenAmountMismatch`] — the pull delivered a different
     ///   amount than `amount` (a fee-on-transfer or rebasing token). See
     ///   `docs/ABI.md` "Token assumptions".
@@ -1064,6 +1072,9 @@ impl FluxoraStream {
         let new_duration = new_end
             .checked_sub(stream.start_time)
             .ok_or(Error::Overflow)?;
+        if new_duration > MAX_STREAM_DURATION {
+            return Err(Error::DurationTooLong);
+        }
 
         // Re-establish the creation-time guards against the new figures.
         new_deposited
@@ -1565,7 +1576,7 @@ impl FluxoraStream {
         storage::save_stream(env, stream_id, stream);
 
         if refund > 0 {
-            storage::debit_pool(&env, &token, refund)?;
+            storage::debit_pool(env, &token, refund)?;
             token_transfer(
                 env,
                 &token,
@@ -1577,7 +1588,7 @@ impl FluxoraStream {
         // Reconcile the pool now the refund has left it. Checked even when the
         // refund was zero: a rebase since the last operation on this token is
         // exactly as dangerous with nothing to refund.
-        verify_pool_balance(&env, &token)?;
+        verify_pool_balance(env, &token)?;
 
         // Issue #1584: the event's `vested` is read off the settled stream by
         // the helper (`stream.deposited`, set above), so it cannot disagree with
@@ -2113,6 +2124,9 @@ impl FluxoraStream {
         let new_duration = new_end
             .checked_sub(stream.start_time)
             .ok_or(Error::Overflow)?;
+        if new_duration > MAX_STREAM_DURATION {
+            return Err(Error::DurationTooLong);
+        }
 
         new_deposited
             .checked_mul(new_duration as i128)

@@ -618,12 +618,12 @@ jobs:
           echo "$meta" | python3 -c '
           import json, sys
           packages = json.load(sys.stdin)["packages"]
-          factory = next((p for p in packages if p["name"] == "fluxora-factory"), None)
+          factory = next((p for p in packages if p["name"] == "fluxora_factory"), None)
           if factory is None:
-              raise SystemExit("fluxora-factory is missing from the workspace")
+              raise SystemExit("fluxora_factory is missing from the workspace")
           if not any("cdylib" in target["kind"] for target in factory["targets"]):
-              raise SystemExit("fluxora-factory has no cdylib target")
-          print("fluxora-factory package and cdylib target verified")
+              raise SystemExit("fluxora_factory has no cdylib target")
+          print("fluxora_factory package and cdylib target verified")
           '
 
   fuzz-feature-matrix:
@@ -834,7 +834,7 @@ jobs:
       # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
       - name: Factory discriminant-stability tests
         if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora-factory
+        run: cargo test -p fluxora_factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
@@ -965,8 +965,38 @@ jobs:
         if: steps.cache-tarpaulin.outputs.cache-hit != 'true'
         run: cargo install cargo-tarpaulin --version "^0.31" --locked
 
-      - name: Measure coverage for every workspace crate
-        run: script/measure-coverage.sh coverage
+      - name: Generate coverage report
+        run: |
+          # Default tarpaulin per-test timeout is 60s. Instrumented proptest
+          # suites in test_withdrawable_props exceed that and abort the job with
+          # "Timed out waiting for test response" (seen on PR coverage runs).
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --out Html \
+            --output-dir coverage \
+            --ignore-tests \
+            --skip-clean \
+            --timeout 300 \
+            -p fluxora-stream
+
+      - name: Generate factory coverage report
+        run: |
+          cargo tarpaulin \
+            --features testutils \
+            --out Xml \
+            --output-dir coverage/factory \
+            --ignore-tests \
+            --skip-clean \
+            --timeout 300 \
+            -p fluxora_factory
+
+      - name: Enforce committed factory coverage floor
+        run: |
+          python3 script/check_stream_coverage.py \
+            --xml coverage/factory/cobertura.xml \
+            --floor contracts/factory/coverage-floor.txt \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Enforce committed per-crate coverage floors
         run: |

@@ -247,6 +247,59 @@ fn rejects_non_positive_duration() {
     }
 }
 
+#[test]
+fn maximum_duration_creation_stays_within_one_stroop_of_exact_accrual() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = crate::MAX_STREAM_DURATION;
+    let deposit = duration as i128 + 1;
+
+    let id = h.create(deposit, start, start + duration, start, true, true, true);
+    h.env.ledger().set_timestamp(start + duration - 1);
+
+    let actual = h.client.vested_of(&id);
+    let numerator = deposit * (duration - 1) as i128;
+    let remainder = numerator % duration as i128;
+    assert_eq!(remainder, duration as i128 - 1);
+    assert_eq!(actual, numerator / duration as i128);
+    assert_eq!(actual, duration as i128 - 1);
+    assert!(
+        numerator - actual * (duration as i128) < duration as i128,
+        "linear accrual must be less than one stroop below exact"
+    );
+}
+
+#[test]
+fn duration_above_maximum_is_rejected_with_duration_too_long() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = crate::MAX_STREAM_DURATION + 1;
+    let sender_before = h.balance(&h.sender);
+
+    let err = h
+        .client
+        .try_create_stream(
+            &h.sender,
+            &h.recipient,
+            &h.token,
+            &(duration as i128),
+            &start,
+            &(start + duration),
+            &start,
+            &true,
+            &true,
+            &true,
+            &None,
+        )
+        .unwrap_err()
+        .unwrap();
+
+    assert_eq!(err, Error::DurationTooLong);
+    assert_eq!(h.client.stream_count(), 0);
+    assert_eq!(h.balance(&h.sender), sender_before);
+    assert_eq!(h.pool(), 0);
+}
+
 /// The zero-duration boundary (`end_time == start_time`) is **rejected**, not
 /// treated as "already fully vested". A zero-length schedule would divide by
 /// zero in the vesting math, so creation must fail with a typed error and
