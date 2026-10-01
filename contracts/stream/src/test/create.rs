@@ -50,6 +50,7 @@ fn stream_ids_exhaust_with_a_typed_error_at_the_u64_boundary() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -89,6 +90,7 @@ fn create_is_rejected_when_the_counter_is_already_exhausted() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -184,6 +186,7 @@ fn rejects_stream_to_self() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -208,6 +211,7 @@ fn rejects_non_positive_deposit() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();
@@ -235,6 +239,7 @@ fn rejects_non_positive_duration() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();
@@ -266,6 +271,7 @@ fn zero_duration_creation_is_rejected_without_partial_state() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -311,6 +317,7 @@ fn rejects_cliff_outside_the_schedule() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();
@@ -352,6 +359,7 @@ fn rejects_deposit_below_one_stroop_per_second() {
                     &true,
                     &true,
                     &true,
+                    &None,
                 )
                 .unwrap_err()
                 .unwrap();
@@ -397,6 +405,7 @@ fn rejects_deposit_that_would_overflow_accrual() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -545,6 +554,7 @@ fn a_rejected_create_leaves_no_residue_for_a_retry() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();

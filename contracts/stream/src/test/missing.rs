@@ -2,9 +2,9 @@
 //! record-dependent methods return `StreamNotFound`, while the existence
 //! predicate returns `false`. A live stream with no accrued value is distinct
 //! from a missing stream and returns a valid zero from its accrual views.
-use soroban_sdk::testutils::Ledger as _;
 use super::common::*;
 use crate::{DataKey, Error};
+use soroban_sdk::testutils::Ledger as _;
 
 const MISSING_ID: u64 = 999;
 

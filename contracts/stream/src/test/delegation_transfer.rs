@@ -459,7 +459,10 @@ fn funds_conservation_holds_across_transfer_and_delegate_withdraw() {
     // Invariant check: conservation right after transfer.
     {
         let s = h.get(id);
-        assert_eq!(s.deposited, deposit, "deposited must not change on transfer");
+        assert_eq!(
+            s.deposited, deposit,
+            "deposited must not change on transfer"
+        );
         assert_eq!(s.withdrawn, 200 * ONE, "withdrawn carries forward");
         assert_eq!(
             h.client.vested_of(&id) + h.client.refundable_of(&id),
@@ -530,11 +533,7 @@ fn funds_conservation_holds_across_transfer_and_delegate_withdraw() {
 
     // Total tokens out = 200 (direct, old recipient) + 400 (delegate) + 300 + 300
     //                  = 1 200 ONE = deposit.  Pool must be exactly 0.
-    assert_eq!(
-        h.pool(),
-        0,
-        "pool must be empty after full depletion"
-    );
+    assert_eq!(h.pool(), 0, "pool must be empty after full depletion");
     h.assert_pool_exact();
 
     // Final conservation: vested + refundable == deposited still holds on a

@@ -77,7 +77,10 @@ fn assert_withdrawn_event(h: &Harness, id: u64, recipient_before: i128) -> i128 
     let stream = h.get(id);
     let payout = h.balance(&h.recipient) - recipient_before;
 
-    assert!(payout > 0, "withdraw emitted a Withdrawn event but payout was zero");
+    assert!(
+        payout > 0,
+        "withdraw emitted a Withdrawn event but payout was zero"
+    );
 
     let expected = Withdrawn {
         stream_id: id,
@@ -195,8 +198,7 @@ fn same_ledger_withdraw_then_cancel(offset: u64) {
 
     // Expected vested at this exact instant (same formula the contract uses,
     // rounded down). Clamped to the full deposit after end_time.
-    let expected_vested =
-        deposit * (offset.min(duration) as i128) / (duration as i128);
+    let expected_vested = deposit * (offset.min(duration) as i128) / (duration as i128);
 
     // ── Step 1: withdraw ──────────────────────────────────────────────────
     if expected_vested == 0 {
@@ -234,7 +236,11 @@ fn same_ledger_withdraw_then_cancel(offset: u64) {
             "offset={offset}: cancel after depletion must return StreamTerminated",
         );
         // Pool must already be empty — the withdraw drained everything.
-        assert_eq!(h.pool(), 0, "offset={offset}: pool must be empty after depletion");
+        assert_eq!(
+            h.pool(),
+            0,
+            "offset={offset}: pool must be empty after depletion"
+        );
     } else {
         // The unvested remainder is still in the pool; cancel refunds it.
         let deposited_before_cancel = h.get(id).deposited;
@@ -303,8 +309,7 @@ fn same_ledger_cancel_then_withdraw(offset: u64) {
     let recipient_before = h.balance(&h.recipient);
     let sender_before = h.balance(&h.sender);
 
-    let expected_vested =
-        deposit * (offset.min(duration) as i128) / (duration as i128);
+    let expected_vested = deposit * (offset.min(duration) as i128) / (duration as i128);
 
     // ── Step 1: cancel ────────────────────────────────────────────────────
     let deposited_before = h.get(id).deposited;
@@ -376,22 +381,22 @@ fn same_ledger_cancel_then_withdraw(offset: u64) {
 
 #[test]
 fn same_ledger_withdraw_then_cancel_schedule_points() {
-    same_ledger_withdraw_then_cancel(0);          // Start — nothing vested
-    same_ledger_withdraw_then_cancel(25 * DAY);   // Quarter
-    same_ledger_withdraw_then_cancel(50 * DAY);   // Halfway
-    same_ledger_withdraw_then_cancel(99 * DAY);   // Near end
-    same_ledger_withdraw_then_cancel(100 * DAY);  // Exact end → Depleted
-    same_ledger_withdraw_then_cancel(150 * DAY);  // Post-end → still Depleted
+    same_ledger_withdraw_then_cancel(0); // Start — nothing vested
+    same_ledger_withdraw_then_cancel(25 * DAY); // Quarter
+    same_ledger_withdraw_then_cancel(50 * DAY); // Halfway
+    same_ledger_withdraw_then_cancel(99 * DAY); // Near end
+    same_ledger_withdraw_then_cancel(100 * DAY); // Exact end → Depleted
+    same_ledger_withdraw_then_cancel(150 * DAY); // Post-end → still Depleted
 }
 
 #[test]
 fn same_ledger_cancel_then_withdraw_schedule_points() {
-    same_ledger_cancel_then_withdraw(0);          // Start — nothing vested
-    same_ledger_cancel_then_withdraw(25 * DAY);   // Quarter
-    same_ledger_cancel_then_withdraw(50 * DAY);   // Halfway
-    same_ledger_cancel_then_withdraw(99 * DAY);   // Near end
-    same_ledger_cancel_then_withdraw(100 * DAY);  // Exact end
-    same_ledger_cancel_then_withdraw(150 * DAY);  // Post-end
+    same_ledger_cancel_then_withdraw(0); // Start — nothing vested
+    same_ledger_cancel_then_withdraw(25 * DAY); // Quarter
+    same_ledger_cancel_then_withdraw(50 * DAY); // Halfway
+    same_ledger_cancel_then_withdraw(99 * DAY); // Near end
+    same_ledger_cancel_then_withdraw(100 * DAY); // Exact end
+    same_ledger_cancel_then_withdraw(150 * DAY); // Post-end
 }
 
 /// Both orderings produce the same net outcome: the same recipient total, the
@@ -426,12 +431,33 @@ fn both_orderings_agree_on_outcome() {
     let r2_delta = h2.balance(&h2.recipient) - r2_before;
     let s2_delta = h2.balance(&h2.sender) - s2_before;
 
-    assert_eq!(r1_delta, r2_delta, "recipient outcome must be order-independent");
-    assert_eq!(s1_delta, s2_delta, "sender outcome must be order-independent");
-    assert_eq!(r1_delta, expected_vested, "recipient must receive exactly vested");
-    assert_eq!(s1_delta, deposit - expected_vested, "sender must receive exactly unvested");
-    assert_eq!(r1_delta + s1_delta, deposit, "conservation: no funds created or destroyed");
-    assert_eq!(r2_delta + s2_delta, deposit, "conservation: no funds created or destroyed");
+    assert_eq!(
+        r1_delta, r2_delta,
+        "recipient outcome must be order-independent"
+    );
+    assert_eq!(
+        s1_delta, s2_delta,
+        "sender outcome must be order-independent"
+    );
+    assert_eq!(
+        r1_delta, expected_vested,
+        "recipient must receive exactly vested"
+    );
+    assert_eq!(
+        s1_delta,
+        deposit - expected_vested,
+        "sender must receive exactly unvested"
+    );
+    assert_eq!(
+        r1_delta + s1_delta,
+        deposit,
+        "conservation: no funds created or destroyed"
+    );
+    assert_eq!(
+        r2_delta + s2_delta,
+        deposit,
+        "conservation: no funds created or destroyed"
+    );
 
     h1.assert_pool_exact();
     h2.assert_pool_exact();
@@ -467,15 +493,18 @@ fn prior_withdrawal_does_not_affect_same_ledger_conservation() {
     // post-cancel deposited = 500 = vested_at_cancel.
     let sender_before_cancel = h.balance(&h.sender);
     h.client.cancel(&id);
-    let (vested, refunded) =
-        assert_cancelled_event(&h, id, sender_before_cancel, deposited_before);
+    let (vested, refunded) = assert_cancelled_event(&h, id, sender_before_cancel, deposited_before);
     assert_eq!(vested, vested_at_cancel);
     assert_eq!(refunded, deposit - vested_at_cancel);
 
     // Withdraw the remaining claimable (200 = 500 vested − 300 already drawn).
     let recipient_before_w2 = h.balance(&h.recipient);
     let payout2 = h.client.withdraw(&id, &None);
-    assert_eq!(payout2, 200 * ONE, "only the unclaimed 200 must be paid, not 500");
+    assert_eq!(
+        payout2,
+        200 * ONE,
+        "only the unclaimed 200 must be paid, not 500"
+    );
     assert_withdrawn_event(&h, id, recipient_before_w2);
 
     h.assert_pool_exact();

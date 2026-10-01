@@ -690,6 +690,7 @@ fn test_no_event_on_failure() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     assert!(res.is_err(), "Stream creation should fail");

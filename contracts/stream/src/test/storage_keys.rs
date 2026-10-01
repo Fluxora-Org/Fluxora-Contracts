@@ -62,8 +62,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::Env;
 
-use crate::types::{DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
-use crate::types::{CliffMode, DataKey, Stream, StreamStatus};
+use crate::types::{CliffMode, DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -249,6 +248,9 @@ fn stream_curve_keys_are_distinct_and_injective() {
                 "StreamCurve({a}) and StreamCurve({b}) produced identical keys"
             );
         }
+    }
+}
+
 /// `HaltOperator` — unit variant encoding the symbol name "HaltOperator".
 ///
 /// Appended without touching any existing variant: the encoding is derived

@@ -15,6 +15,28 @@ use soroban_sdk::contracterror;
 /// only mutated after all validation and the token transfer succeed. If any
 /// phase fails, no ID is consumed and no count is incremented; stream IDs are
 /// therefore contiguous with no gaps.
+///
+/// ## Terminal stream statuses
+/// A stream reaches a terminal status when no further accrual or state change
+/// is possible. Two distinct terminal statuses exist, and callers must be able
+/// to tell them apart because they mean different things for retry logic:
+///
+/// - [`Error::StreamTerminated`] (discriminant 14) — the stream ended *early*.
+///   It is reached when the sender `cancel`s the stream (`Cancelled`) or when
+///   the recipient withdraws the exact withdrawable balance and the stream
+///   becomes `Depleted`. Both are permanent: the stream can never accrue or be
+///   resumed again.
+/// - [`Error::StreamMatured`] (discriminant 15) — the stream ended *naturally*.
+///   It is reached when the accrual clock has passed `end_time` and the full
+///   deposit has vested. This is also permanent, but it signals successful
+///   completion rather than an early stop.
+///
+/// Both terminal statuses are permanent, so a caller retrying a mutating
+/// operation must not retry blindly: it should branch on which variant was
+/// returned to distinguish an early stop from a natural completion.
+///
+/// [`StreamStatus::is_terminal`] covers exactly these two statuses
+/// (discriminants 14 and 15) and nothing else.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -59,14 +81,24 @@ pub enum Error {
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
     StreamAlreadyPaused = 13,
-    /// Action attempted on a `Cancelled` or `Depleted` stream.
+    /// Action attempted on a stream that ended early: a `Cancelled` stream, or
+    /// a `Depleted` stream (the recipient withdrew the exact withdrawable
+    /// balance).
     ///
-    /// A stream is `Depleted` when the recipient withdraws the exact
-    /// withdrawable balance; subsequent withdrawals return this error.
+    /// This is a *terminal* status: the stream can never accrue or be resumed
+    /// again, so the error is permanent. It is distinguishable from
+    /// [`Self::StreamMatured`], which signals natural completion rather than an
+    /// early stop. Callers retrying a mutating operation must branch on which
+    /// of the two terminal variants was returned.
     StreamTerminated = 14,
-    /// `top_up` on a stream whose accrual clock has already reached `end_time`,
+    /// `top_up` on a stream whose accrual clock has already reached `end_time`.
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
+    ///
+    /// This is a *terminal* status: the stream completed naturally and the
+    /// full deposit has vested. Like [`Self::StreamTerminated`] it is
+    /// permanent, but it signals successful completion rather than an early
+    /// stop, so callers must be able to tell the two apart.
     StreamMatured = 15,
 
     // --- Withdrawal ---
@@ -235,29 +267,19 @@ pub enum Error {
     /// be a no-op.
     ContractNotHalted = 38,
 
-    // --- Split streams ---
-    /// The supplied share list is invalid.
-    ///
-    /// Possible causes:
-    ///
-    /// * Empty list or a single-entry list (use `create_stream` for one
-    ///   recipient).
-    /// * More than [`crate::types::MAX_SPLIT_RECIPIENTS`] entries.
-    /// * Basis-point values do not sum to [`crate::types::TOTAL_BPS`] (10 000).
-    /// * A `bps` entry is zero.
-    /// * The same recipient address appears more than once.
-    /// * A share recipient equals the sender (`SelfStream` is still raised for
-    ///   the first entry that is a self-stream rather than this variant).
-    InvalidShares = 41,
-    /// `withdraw_share` was called on a stream that was not created with
-    /// `create_stream_split`, or `get_stream_shares` was called on a plain
-    /// stream. Both cases are unambiguously wrong, not a matter of timing.
-    StreamNotSplit = 42,
-    /// `withdraw_share` caller is not in the stream's share list.
-    ///
-    /// The recipient supplied as the argument is not one of the addresses in
-    /// [`crate::types::StreamShares`]. Returned instead of
-    /// [`Self::Unauthorized`] so integrators can tell "wrong stream" from
-    /// "wrong caller" without an extra `get_stream_shares` round-trip.
-    RecipientNotInShares = 43,
+    // --- Factory policy ---
+    /// `create_stream_via_factory` was called while the factory's creation
+    /// pause is engaged. The factory admin must unpause before new
+    /// factory-routed streams are accepted.
+    FactoryPaused = 41,
+    /// The deposit exceeds the factory's configured `max_deposit` cap.
+    DepositExceedsCap = 42,
+    /// The stream duration is shorter than the factory's `min_duration` floor.
+    DurationBelowMinimum = 43,
+    /// The token is not on the factory's allowlist.
+    TokenNotAllowlisted = 44,
+    /// The per-second rate is below the factory's `min_rate_per_second` bound.
+    RateBelowMin = 45,
+    /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
+    RateAboveMax = 46,
 }

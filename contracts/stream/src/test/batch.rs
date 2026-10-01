@@ -158,6 +158,7 @@ fn a_mixed_batch_with_an_unauthorized_item_rolls_back_everything() {
         &true,
         &true,
         &true,
+        &None,
     );
     let second_valid = h.create_simple(100 * ONE, 100 * DAY);
     h.advance(10 * DAY);
@@ -323,6 +324,7 @@ fn a_batch_can_span_multiple_tokens() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.advance(50 * DAY);
@@ -595,6 +597,7 @@ fn an_unauthorized_stream_anywhere_reverts_the_whole_batch() {
             &true,
             &true,
             &true,
+            &None,
         );
         h.advance(30 * DAY);
 
@@ -882,21 +885,25 @@ fn duplicate_rejection_is_order_independent_for_balances_and_events() {
 #[test]
 fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
     let h = Harness::new();
-    
+
     // Create a stream with a known accrued balance.
     let stream_id = h.create_simple(100 * ONE, 100 * DAY);
     h.advance(50 * DAY);
-    
+
     // At this point, the stream has accrued 50 * ONE and has never been withdrawn.
     let withdrawable = h.client.withdrawable_of(&stream_id);
-    assert_eq!(withdrawable, 50 * ONE, "stream should have 50 tokens withdrawable");
-    
+    assert_eq!(
+        withdrawable,
+        50 * ONE,
+        "stream should have 50 tokens withdrawable"
+    );
+
     // Capture all balances before the attempted batch.
     let recipient_before = h.balance(&h.recipient);
     let sender_before = h.balance(&h.sender);
     let pool_before = h.pool();
     let withdrawn_before = h.get(stream_id).withdrawn;
-    
+
     // Attempt a batch containing the same stream id twice.
     // Without the duplicate check, this would:
     // 1. Load the stream state twice in the resolution phase
@@ -911,20 +918,20 @@ fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
         .try_batch_withdraw(&h.recipient, &h.ids(&[stream_id, stream_id]))
         .unwrap_err()
         .unwrap();
-    
+
     // The duplicate check rejects the batch before any mutation.
     assert_eq!(
         err,
         Error::DuplicateStreamId,
         "batch with duplicate id must be rejected"
     );
-    
+
     // No events were emitted — the failed batch is invisible.
     assert!(
         withdrawn_event_ids(&h).is_empty(),
         "failed batch must not emit any events"
     );
-    
+
     // Funds conservation: all three balances are unchanged.
     assert_eq!(
         h.balance(&h.recipient),
@@ -941,7 +948,7 @@ fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
         pool_before,
         "pool balance must not change on rejection"
     );
-    
+
     // Per-stream accounting is untouched.
     assert_eq!(
         h.get(stream_id).withdrawn,
@@ -953,12 +960,13 @@ fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
         crate::StreamStatus::Active,
         "stream status must remain Active"
     );
-    
+
     // Demonstrate that a corrected batch (single occurrence) succeeds and pays
     // exactly the accrued amount, not double.
     let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[stream_id]));
     assert_eq!(
-        total, 50 * ONE,
+        total,
+        50 * ONE,
         "corrected batch pays exactly the accrued balance, once"
     );
     assert_eq!(
@@ -971,7 +979,7 @@ fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
         recipient_before + 50 * ONE,
         "recipient receives exactly the accrued balance"
     );
-    
+
     // Final funds conservation check: pool liability equals the sum of all
     // (deposited - withdrawn) across every stream.
     h.assert_pool_exact();

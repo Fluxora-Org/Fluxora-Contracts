@@ -10,6 +10,7 @@ on:
     # Nightly deep fuzz. The randomized suites have found two real bugs
     # (depleted-while-paused, and top_up rounding driving vested backwards),
     # so they get a budget that a per-PR run cannot afford.
+    
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
@@ -67,6 +68,9 @@ jobs:
       # Wiping them guarantees pytest picks up the on-disk `.py` source.
       - name: Clear Python bytecode cache
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Verify Soroban SDK version records
+        run: python3 script/verify_soroban_version.py
 
       - name: Run test suite with coverage
         run: >-
@@ -137,8 +141,30 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+      # Hard gate (issue #1692): contracts/stream/abi/fluxora_stream.json must
+      # list every public #[contractimpl] entry point in lib.rs, and every
+      # function in the JSON must be documented in docs/ABI.md.
+      # Exit 1 = drift detected (fail the build); exit 2 = bad inputs.
+      # To regenerate the committed file: python3 script/check-abi-drift.py --regenerate
+      - name: ABI drift check (JSON vs lib.rs vs docs/ABI.md)
+        run: python3 script/check-abi-drift.py
+
       - name: Migration path validation (docs/MIGRATION.md vs ABI)
         run: python3 script/validate_migration.py
+
+      # Hard gate (issue #1701): every #[contractevent] struct in
+      # contracts/stream/src/events.rs must have a schema fixture under
+      # tests/fixtures/event_snapshots/events/, and each fixture must match the
+      # parsed payload shape. A new event shipped without a fixture, or an
+      # event whose payload fields changed without regenerating its fixture,
+      # fails here. See docs/event-snapshots.md.
+      #
+      # `if: always()` keeps the verdict visible: an earlier step in this job
+      # can fail for reasons that have nothing to do with event fixtures, and
+      # without it this gate would be skipped rather than reported.
+      - name: Event snapshot coverage gate
+        if: always()
+        run: python3 script/check_event_snapshots.py
 
   # ---------------------------------------------------------------------------
   # Fast changed-files lint (PRs only).  Mirrors what developers run locally
@@ -384,6 +410,14 @@ jobs:
       - name: Build release artifacts (product only)
         run: script/release.sh
 
+      # Issue #1871: keep the real release and dry-run paths in lockstep on
+      # every pull request. These checks are local-only and need no secrets.
+      - name: Validate release dry-run parity and regression suite
+        run: bash script/test-release-dry-run.sh
+
+      - name: Run release dry-run (local validation)
+        run: script/release-dry-run.sh --local-only --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+
       - name: Verify Rust toolchain version
         if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
         run: python3 script/verify_rust_version.py
@@ -462,6 +496,17 @@ jobs:
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_stream.wasm
           test -s target/wasm32v1-none/release/fluxora_factory.wasm
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_factory.wasm
+
+      - name: Generate ABI from optimized WASM
+        run: script/generate_abi.sh
+
+      - name: Upload ABI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora-stream-abi
+          path: contracts/stream/abi/fluxora_abi.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Compute WASM SHA256 hash
         run: |
@@ -920,44 +965,13 @@ jobs:
         if: steps.cache-tarpaulin.outputs.cache-hit != 'true'
         run: cargo install cargo-tarpaulin --version "^0.31" --locked
 
-      - name: Generate coverage report
-        run: |
-          # Default tarpaulin per-test timeout is 60s. Instrumented proptest
-          # suites in test_withdrawable_props exceed that and abort the job with
-          # "Timed out waiting for test response" (seen on PR coverage runs).
-          cargo tarpaulin \
-            --features testutils \
-            --out Xml \
-            --out Html \
-            --output-dir coverage \
-            --ignore-tests \
-            --skip-clean \
-            --timeout 300 \
-            -p fluxora-stream
+      - name: Measure coverage for every workspace crate
+        run: script/measure-coverage.sh coverage
 
-      - name: Generate factory coverage report
+      - name: Enforce committed per-crate coverage floors
         run: |
-          cargo tarpaulin \
-            --features testutils \
-            --out Xml \
-            --output-dir coverage/factory \
-            --ignore-tests \
-            --skip-clean \
-            --timeout 300 \
-            -p fluxora-factory
-
-      - name: Enforce committed factory coverage floor
-        run: |
-          python3 script/check_stream_coverage.py \
-            --xml coverage/factory/cobertura.xml \
-            --floor contracts/factory/coverage-floor.txt \
-            --summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Enforce committed coverage floor
-        run: |
-          python3 script/check_stream_coverage.py \
-            --xml coverage/cobertura.xml \
-            --floor contracts/stream/coverage-floor.txt \
+          python3 script/check_coverage_floors.py \
+            --reports-dir coverage \
             --summary "$GITHUB_STEP_SUMMARY" \
             --github-output "$GITHUB_OUTPUT"
         id: coverage_gate
@@ -966,7 +980,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: coverage/cobertura.xml
+          files: coverage/*/cobertura.xml
           fail_ci_if_error: false
           verbose: true
 

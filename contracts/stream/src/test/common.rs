@@ -315,7 +315,12 @@ impl<'a> Harness<'a> {
     }
 
     /// Create with reference support - simple case
-    pub fn create_simple_with_ref(&self, deposit: i128, duration: u64, reference: Option<soroban_sdk::String>) -> u64 {
+    pub fn create_simple_with_ref(
+        &self,
+        deposit: i128,
+        duration: u64,
+        reference: Option<soroban_sdk::String>,
+    ) -> u64 {
         let start = self.now();
         self.client.create_stream(
             &self.sender,
@@ -358,7 +363,6 @@ impl<'a> Harness<'a> {
             &transferable,
             &reference,
         )
-        )
     }
 
     /// Full control over every creation parameter, including which clock the
@@ -387,6 +391,7 @@ impl<'a> Harness<'a> {
             &cancellable,
             &pausable,
             &transferable,
+            &None,
         )
     }
 

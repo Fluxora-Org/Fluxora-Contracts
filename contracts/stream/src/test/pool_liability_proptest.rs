@@ -329,6 +329,7 @@ fn create_one(h: &Harness, rng: &mut Rng, stats: &mut SequenceStats) -> &'static
             &cancellable,
             &pausable,
             &transferable,
+            &None,
         )
         .is_ok();
     if accepted {

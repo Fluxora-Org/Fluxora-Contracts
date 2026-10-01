@@ -29,6 +29,14 @@ There is therefore no upgrade authorization or in-place migration process.
 The ABI inventory below is the deployed surface and contains no upgrade or
 admin-rotation method.
 
+This is confirmed against the entry points the contract actually exposes: the
+complete public surface is the 24 methods enumerated in [Entry points](#entry-points)
+— lifecycle, views, maintenance, delegation and the emergency halt — and none of
+them replaces code, rotates an admin, or writes a new implementation hash. There
+is no `upgrade`, `set_admin`, `migrate` or equivalent entry point in the ABI
+inventory or in `contracts/stream/src/lib.rs`. The posture is therefore a
+property of the deployed surface, not merely a policy statement.
+
 The single exception to "no operator" is the **emergency halt** (issue #1818):
 an operator address can be installed once, has no rotation path, and can only
 stop and restart settlement contract-wide — it holds no key over funds, no
@@ -47,7 +55,7 @@ stellar contract info interface --id CBCGTSCJ… --network testnet
 ## What "frozen" means
 
 The core contract is **immutable** — no admin key, no upgrade path (see the
-non-goals). The interface therefore cannot change on the deployed contract at
+[Upgrade posture](#upgrade-posture) above). The interface therefore cannot change on the deployed contract at
 all; a change means a *new deployment at a new address*.
 
 So the freeze is a commitment about how we manage that:
@@ -76,6 +84,29 @@ discriminant and event is generated from that same spec XDR and committed at
 `test::abi` fails the suite if a method is removed, renamed, or type-changed
 without bumping [`ABI_VERSION`](../contracts/stream/src/lib.rs). Additive
 changes update the snapshot only.
+
+**Regenerating the committed ABI file.** After adding or removing an entry
+point, regenerate `contracts/stream/abi/fluxora_stream.json` and update this
+document:
+
+```bash
+# Full regeneration from the built WASM (authoritative — includes full types):
+stellar contract info interface \
+  --wasm target/wasm32v1-none/release/fluxora_stream.wasm \
+  --output json > contracts/stream/abi/fluxora_stream.json
+
+# Quick structural sync from lib.rs (updates the function-name list only;
+# use when the WASM is not yet built or for a fast sanity check):
+python3 script/check-abi-drift.py --regenerate
+
+# Verify the committed file is in sync (run by CI on every push):
+python3 script/check-abi-drift.py
+```
+
+CI runs `python3 script/check-abi-drift.py` on every push and pull request
+(the `ABI drift check` step in the `docs-alignment-check` job). A difference
+between the committed JSON and the entry-point surface of `lib.rs`, or a
+function in the JSON that is not mentioned in this document, fails the build.
 
 ### ABI versions
 
@@ -541,12 +572,23 @@ the tolerated-surplus boundary.
 | `withdraw(stream_id, amount: Option<i128>)` | recipient | `i128` paid — [details](#withdraw) |
 | `batch_withdraw(recipient, stream_ids: Vec<u64>)` | recipient | `i128` total |
 | `cancel(stream_id)` | sender | — |
+| `reclaim_dust(stream_id)` | sender | `i128` recovered |
 | `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
+| `batch_create(sender, requests: Vec<BatchCreateRequest>)` | sender | `Vec<u64>` stream ids — creates up to `MAX_BATCH_SIZE` streams in one call |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
 | `revoke_delegate(stream_id, grantor, delegate)` | sender or recipient | — |
 
 `withdraw` with `amount = None` draws the full available balance.
+
+The sender owns any integer-token rounding residue left after settlement.
+`reclaim_dust` is sender-authorized and only transfers the refundable part of
+the outstanding liability; any amount still withdrawable by the recipient is
+reserved for them. It returns zero before a stream is terminal or when
+settlement leaves no sender residue. With the current proportional accrual
+formula, maturity vests the full deposit, so uneven deposit/duration pairs
+settle with zero residue; cancellation returns the unvested remainder at
+cancellation time.
 
 #### `pause(stream_id)` — freeze accrual and the cliff gate
 

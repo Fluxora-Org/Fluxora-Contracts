@@ -140,6 +140,7 @@ fn stream_on_rebasing_token<'a, 'b>(
         &true,
         &true,
         &true,
+        &None,
     );
     (token, rebasing, id)
 }
@@ -281,6 +282,7 @@ fn a_rebase_is_detected_by_batch_withdraw() {
         &true,
         &true,
         &true,
+        &None,
     );
     let b = h.client.create_stream(
         &h.sender,
@@ -293,6 +295,7 @@ fn a_rebase_is_detected_by_batch_withdraw() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -387,6 +390,7 @@ fn a_drift_on_one_token_does_not_block_a_healthy_token() {
         &true,
         &true,
         &true,
+        &None,
     );
     let good_stream = h.client.create_stream(
         &h.sender,
@@ -399,6 +403,7 @@ fn a_drift_on_one_token_does_not_block_a_healthy_token() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 

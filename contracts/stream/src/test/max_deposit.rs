@@ -107,6 +107,7 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         &true,
         &true,
         &true,
+        &None,
     );
     assert_eq!(id, 0, "first stream id");
 
@@ -240,6 +241,7 @@ fn max_deposit_only_survives_a_one_second_schedule() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap();
@@ -270,6 +272,7 @@ fn max_deposit_only_survives_a_one_second_schedule() {
         &true,
         &true,
         &true,
+        &None,
     );
     assert_eq!(id, 0);
     assert_eq!(f.balance(&h.contract_id), deposit);
@@ -308,6 +311,7 @@ fn largest_representable_deposit_is_the_creation_guard_boundary() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -327,6 +331,7 @@ fn largest_representable_deposit_is_the_creation_guard_boundary() {
         &true,
         &true,
         &true,
+        &None,
     );
     assert_eq!(h.get(id).deposited, boundary);
     assert_eq!(f.balance(&h.contract_id), boundary);

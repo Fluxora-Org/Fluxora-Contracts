@@ -3,6 +3,9 @@
 What a green test suite here does **not** prove. Read this before treating any
 part of Fluxora as production-ready.
 
+§8 records the upgrade posture: the deployed contract is **immutable**, and
+that is a deliberate property rather than an omission.
+
 §1 is **closed**: the behaviour it described as untested was measured against
 live testnet on 2026-09-28 and turned out not to be a failure mode at all. It
 stays in this file as the record of that result and of the reasoning it
@@ -543,3 +546,65 @@ read the stream's current `paused_total` from `get_stream`, or the latest
 instant while the stream is pausable. On `WallClock`, display `cliff_time`
 directly; it is the actual instant, and `paused_total` is irrelevant to the
 gate.
+
+---
+
+## 8. The contract is immutable — there is no upgrade entry point
+
+**Status: deliberate.** The deployed stream contract cannot be replaced,
+patched, or migrated in place. This is a property of the code, not a gap in
+the documentation.
+
+**Pinned by:**
+`contracts/stream/src/test/upgrade_posture.rs::no_upgrade_entry_point_is_exposed`,
+which enumerates the contract's exported symbols and asserts that none of them
+is an upgrade, migrate, or `__constructor`-style replacement hook, and
+`tests/test_validator.py::TestKnownLimitations::test_upgrade_posture_is_recorded`,
+which requires this section to exist and to agree with `docs/ABI.md` and
+`docs/MIGRATION.md`.
+
+### What "immutable" means here
+
+`contracts/stream/src/lib.rs` exposes 24 entry points: `create_stream`,
+`create_stream_with_cliff_mode`, `withdraw`, `cancel`, `pause`, `resume`,
+`top_up`, `transfer_recipient`, the six `delegate_*` variants,
+`grant_delegate`, `revoke_delegate`, `batch_withdraw`, `batch_extend_ttl`,
+`extend_stream_ttl`, and the read methods. There is no `upgrade`, no
+`migrate`, and no `set_admin`-style hook that could swap the contract's Wasm
+or its storage layout. The two mentions of "upgrade" in `lib.rs` are comments
+about the ABI version, not entry points.
+
+The contract address is therefore permanent. A bug found after deployment
+cannot be fixed at that address; the only remedies are a new deployment at a
+new address and a client-side migration of stream state, which the contract
+itself cannot perform because it keeps no index of streams by token or by
+owner.
+
+### Consequences an integrator must plan for
+
+* **No in-place fix.** Treat the deployed bytecode as final. Any defect in
+  accounting, authorisation, or rent handling is permanent at that address.
+* **No storage migration.** `docs/MIGRATION.md` describes how to move *users*
+  to a new deployment; it does not describe, and cannot describe, an on-chain
+  migration, because no such entry point exists.
+* **The ABI version is the only forward-compatibility signal.** It is bumped
+  when a change would alter the meaning of an existing call or stored value
+  (see §7, where `CliffMode` moved it to 2). A client that pins the ABI
+  version is pinning the exact behaviour it was written against.
+* **Custody is bounded by the code, not by an admin key.** There is no
+  privileged key that can redirect funds, pause the whole contract, or replace
+  the implementation. The only privileged operations are the per-stream ones
+  the sender already holds (`pause`, `cancel`, `transfer_recipient`), and they
+  are scoped to streams that sender created.
+
+### Why immutable, and not upgradeable
+
+An upgradeable contract holding custody needs an upgrade authority and, to be
+safe, a timelock long enough for integrators to react. Neither exists here, so
+the honest posture is immutability. The trade is explicit: no emergency fix in
+exchange for no upgrade key to compromise. For an unaudited contract, the
+second is the property an integrator can actually verify by reading the ABI.
+
+If a future deployment chooses to be upgradeable, this section must be
+rewritten to specify the authorisation, the timelock, and the tests that pin
+both — and `docs/ABI.md` and `docs/MIGRATION.md` must move with it.

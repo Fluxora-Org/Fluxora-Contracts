@@ -281,6 +281,7 @@ fn a_failed_create_does_not_move_the_boundary() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -302,6 +303,7 @@ fn a_failed_create_does_not_move_the_boundary() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();

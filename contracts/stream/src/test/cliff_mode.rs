@@ -584,6 +584,7 @@ fn cliff_range_validation_is_identical_in_both_modes() {
                     &true,
                     &true,
                     &true,
+                    &None,
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -605,6 +606,7 @@ fn cliff_range_validation_is_identical_in_both_modes() {
                     &true,
                     &true,
                     &true,
+                    &None,
                 )
                 .unwrap_err()
                 .unwrap(),
@@ -633,7 +635,7 @@ fn the_new_entry_point_keeps_every_creation_guard() {
         h.client
             .try_create_stream_with_cliff_mode(
                 &h.sender, &h.sender, &h.token, &DEPOSIT, &start, &end, &cliff, &wall, &true,
-                &true, &true,
+                &true, &true, &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -653,6 +655,7 @@ fn the_new_entry_point_keeps_every_creation_guard() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -672,6 +675,7 @@ fn the_new_entry_point_keeps_every_creation_guard() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -691,6 +695,7 @@ fn the_new_entry_point_keeps_every_creation_guard() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),

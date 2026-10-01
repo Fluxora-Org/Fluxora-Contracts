@@ -478,8 +478,7 @@ fn revoking_one_op_does_not_disturb_a_different_op_on_a_different_delegate() {
         .grant_delegate(&id, &h.recipient, &agent_withdraw, &op::WITHDRAW, &None);
 
     // Revoke only the CANCEL grant.
-    h.client
-        .revoke_delegate(&id, &h.sender, &agent_cancel);
+    h.client.revoke_delegate(&id, &h.sender, &agent_cancel);
 
     // CANCEL delegate is blocked.
     let err = h

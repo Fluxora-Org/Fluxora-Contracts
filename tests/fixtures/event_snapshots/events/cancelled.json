@@ -1,0 +1,51 @@
+{
+  "event": "Cancelled",
+  "topic": "cancelled",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "refunded",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "vested",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "withdrawn",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "end_time",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "paused_at",
+      "type": "Option<u64>",
+      "topic": false
+    },
+    {
+      "name": "paused_total",
+      "type": "u64",
+      "topic": false
+    }
+  ]
+}

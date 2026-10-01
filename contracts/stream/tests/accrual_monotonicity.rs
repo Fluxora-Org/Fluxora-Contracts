@@ -46,9 +46,8 @@
 extern crate std;
 
 use fluxora_stream::{
-    cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, ReleaseCurve,
     cliff_reached, duration, elapsed, refundable, stream_time, vested, withdrawable, CliffMode,
-    Stream, StreamStatus,
+    ReleaseCurve, Stream, StreamStatus,
 };
 use proptest::prelude::*;
 use soroban_sdk::testutils::Address as _;
@@ -89,6 +88,7 @@ fn dummy_stream_with_curve(
         paused_total: 0,
         status: StreamStatus::Active,
         curve,
+        reference: None,
     }
 }
 

@@ -36,9 +36,10 @@ use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
 };
-use crate::{Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus, ABI_VERSION};
-use crate::{BatchCancelOutcome, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
-use crate::{CliffMode, Error, FluxoraStream, Stream, StreamStatus, ABI_VERSION};
+use crate::{
+    BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
+    ABI_VERSION,
+};
 
 // ---------------------------------------------------------------------------
 // Inventory
@@ -99,6 +100,7 @@ const AUTH: &[(&str, &str)] = &[
     ("create_stream_with_cliff_mode", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
+    ("reclaim_dust", "sender"),
     ("batch_cancel", "sender"),
     ("pause", "sender"),
     ("resume", "sender"),
@@ -474,6 +476,12 @@ fn frozen_v1() -> Inventory {
         fn_abi(
             "refundable_of",
             "none",
+            vec![param("stream_id", "u64")],
+            "Result<i128, Error>",
+        ),
+        fn_abi(
+            "reclaim_dust",
+            "sender",
             vec![param("stream_id", "u64")],
             "Result<i128, Error>",
         ),
@@ -1427,7 +1435,6 @@ fn missing_stream_failure_is_stream_not_found_discriminant_one() {
 
 #[test]
 fn oversized_batch_failure_is_batch_too_large_discriminant_nineteen() {
-
     let h = Harness::new();
     let ids: std::vec::Vec<u64> = (0..17).collect();
     let err = h

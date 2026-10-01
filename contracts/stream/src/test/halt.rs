@@ -462,6 +462,7 @@ fn halted_contract_refuses_every_mutating_entry_point() {
             &true,
             &true,
             &true,
+            &None,
         )
     );
 

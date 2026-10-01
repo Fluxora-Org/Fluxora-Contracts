@@ -127,6 +127,7 @@ fn create_foreign(h: &Harness) -> u64 {
         &true,
         &true,
         &true,
+        &None,
     )
 }
 
@@ -751,6 +752,7 @@ fn a_batch_can_span_multiple_tokens() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
     let mine_before = h.balance(&h.sender);

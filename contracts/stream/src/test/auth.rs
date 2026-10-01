@@ -123,6 +123,7 @@ fn create_debits_the_stated_sender_not_a_third_party() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     // The sender argument, not h.sender, was debited.
@@ -497,6 +498,7 @@ fn batch_withdraw_rejects_streams_belonging_to_someone_else() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(10 * DAY);
 
@@ -539,6 +541,7 @@ fn batch_withdraw_rolls_back_entirely_on_unauthorized_stream() {
         &true,
         &true,
         &true,
+        &None,
     );
     h.advance(50 * DAY);
 
@@ -817,6 +820,7 @@ fn smart_account_addresses_work_as_sender_and_recipient() {
         &true,
         &true,
         &true,
+        &None,
     );
     assert_eq!(required_auth(&h.env), smart_sender, "create auth");
 
@@ -872,6 +876,7 @@ fn delegated_address_cannot_act_on_a_stream_it_does_not_own() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.advance(10 * DAY);

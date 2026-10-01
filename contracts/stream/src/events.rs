@@ -109,8 +109,7 @@
 //! against storage and token balances in `test::cancel_events`.
 use soroban_sdk::{contractevent, Address, Env, String};
 
-use crate::types::{ReleaseCurve, Stream, StreamStatus};
-use crate::types::{CliffMode, Stream, StreamStatus};
+use crate::types::{CliffMode, ReleaseCurve, Stream, StreamStatus};
 
 /// A new stream was created. Carries the complete initial state — this is the
 /// event an indexer builds its sender/recipient mapping from — including the

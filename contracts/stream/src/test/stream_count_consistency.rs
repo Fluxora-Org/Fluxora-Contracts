@@ -107,6 +107,7 @@ fn reject_self_stream(h: &Harness) {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -131,6 +132,7 @@ fn reject_unaffordable_deposit(h: &Harness) {
         &true,
         &true,
         &true,
+        &None,
     );
     assert!(
         result.is_err(),
@@ -381,6 +383,7 @@ fn a_terminal_operation_failing_partway_leaves_counter_and_population_agreeing()
         &true,
         &true,
         &true,
+        &None,
     );
     h.assert_stream_count_consistent();
 
