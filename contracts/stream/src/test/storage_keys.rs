@@ -517,6 +517,7 @@ fn deterministic_stream(env: &Env) -> Stream {
         paused_total: 0,
         status: StreamStatus::Active,
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 
@@ -913,6 +914,8 @@ fn v2_layout_round_trips() {
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve: ReleaseCurve::Linear,
+        reference: None,
     };
 
     let bytes = stream.to_xdr(&env);

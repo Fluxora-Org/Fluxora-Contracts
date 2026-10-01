@@ -1218,6 +1218,9 @@ fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
             withdrawn: deposit,
             deposited: deposit,
             status: StreamStatus::Depleted,
+            sender: h.sender.clone(),
+            paused_at: None,
+            paused_total: 0,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "withdrawal event must report the same unscaled raw amount"
