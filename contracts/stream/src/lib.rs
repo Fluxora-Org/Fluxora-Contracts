@@ -96,8 +96,6 @@ mod events;
 mod protocol_limits;
 mod storage;
 mod types;
-#[cfg(test)]
-mod protocol_limits;
 
 pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
@@ -654,6 +652,8 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        sender.require_auth();
+
         Self::create_stream_inner(
             env,
             sender,
@@ -679,6 +679,22 @@ impl FluxoraStream {
     /// two public entry points are the single, documented surface and neither
     /// can drift from the other: the linear path *is* the curve path with
     /// [`ReleaseCurve::Linear`] selected.
+    ///
+    /// # Authorization
+    ///
+    /// This body deliberately does **not** call `sender.require_auth()`. Every
+    /// caller authorizes `sender` exactly once, at its own entry point, and
+    /// this function is shared by four of them — `create_stream`,
+    /// `create_stream_with_cliff_mode`, `create_stream_with_curve` and
+    /// `batch_create` (via `create_stream_unchecked`, which authorizes once for
+    /// the whole batch rather than once per element).
+    ///
+    /// Authorizing again here would be redundant *and* fatal: a second
+    /// `require_auth()` for the same address in the same frame traps the host
+    /// with `Error(Auth, ExistingValue)`, so the duplicate is not merely
+    /// wasteful — it makes the call fail outright. This mirrors
+    /// `settle_cancel`, which likewise performs no authorization of its own so
+    /// `cancel` and `batch_cancel` can share it.
     #[allow(clippy::too_many_arguments)]
     fn create_stream_inner(
         env: Env,
@@ -698,7 +714,6 @@ impl FluxoraStream {
     ) -> Result<u64, Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
         Self::require_not_halted(&env)?;
-        sender.require_auth();
 
         if sender == recipient {
             return Err(Error::SelfStream);
@@ -892,6 +907,11 @@ impl FluxoraStream {
         pausable: bool,
         transferable: bool,
     ) -> Result<u64, Error> {
+        // Authorize the sender here, at the entry point. `create_stream_inner`
+        // deliberately does not authorize, because it is shared with callers
+        // that have already done so — see its doc comment.
+        sender.require_auth();
+
         // Load policy from the factory contract via cross-contract calls.
         // `get_factory_config` and `is_allowlisted` are permissionless read
         // views — no auth is required or consumed.

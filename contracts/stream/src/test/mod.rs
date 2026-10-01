@@ -81,6 +81,13 @@ mod delegate_multi_bit_grant;
 // Issue #1854: two delegates holding WITHDRAW on one stream settle in the
 // same ledger serialised by storage — no double settlement, funds conserved.
 mod delegate_concurrent_withdraw;
+// Issue #1924: the boundary `delegation` (who may act) and
+// `terminal_operations` (what a terminal stream does) meet at — a stream that
+// reaches maturity between a delegate's grant check and their call. Maturity is
+// a clock fact, not a status: a matured stream is still Active until its claim
+// is drawn, which is what makes the delegated withdrawal, pause and cancel
+// each behave differently at that instant.
+mod delegate_maturity;
 mod pause;
 mod storage_keys;
 mod terminal_operations;
