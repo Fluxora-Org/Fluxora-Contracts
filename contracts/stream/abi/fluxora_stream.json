@@ -411,6 +411,14 @@
       "outputs": "Result<i128, Error>"
     },
     {
+      "name": "reclaim_dust",
+      "auth": "sender",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<i128, Error>"
+    },
+    {
       "name": "resume",
       "auth": "sender",
       "inputs": [
@@ -550,28 +558,13 @@
   ],
   "types": [
     {
-      "name": "BatchCancelOutcome",
-      "kind": "struct",
-      "fields": [
+      "name": "create_stream_with_curve",
+      "auth": "sender",
+      "inputs": [
         {
-          "name": "refused_index",
-          "type": "Option<u32>"
+          "name": "sender",
+          "type": "Address"
         },
-        {
-          "name": "refused_reason",
-          "type": "Option<u32>"
-        },
-        {
-          "name": "refunded",
-          "type": "i128"
-        }
-      ],
-      "cases": []
-    },
-    {
-      "name": "BatchCreateRequest",
-      "kind": "struct",
-      "fields": [
         {
           "name": "cancellable",
           "type": "bool"

@@ -40,6 +40,9 @@ use crate::test::common::Harness;
 use crate::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream,
     StreamStatus, ABI_VERSION, UPGRADEABLE,
+use crate::{
+    BatchCancelOutcome, CliffMode, Error, FluxoraStream, ReleaseCurve, Stream, StreamStatus,
+    ABI_VERSION,
 };
 
 // ---------------------------------------------------------------------------
@@ -102,6 +105,7 @@ const AUTH: &[(&str, &str)] = &[
     ("batch_create", "sender"),
     ("top_up", "sender"),
     ("cancel", "sender"),
+    ("reclaim_dust", "sender"),
     ("batch_cancel", "sender"),
     ("pause", "sender"),
     ("resume", "sender"),
@@ -483,6 +487,12 @@ fn frozen_v1() -> Inventory {
         fn_abi(
             "refundable_of",
             "none",
+            vec![param("stream_id", "u64")],
+            "Result<i128, Error>",
+        ),
+        fn_abi(
+            "reclaim_dust",
+            "sender",
             vec![param("stream_id", "u64")],
             "Result<i128, Error>",
         ),

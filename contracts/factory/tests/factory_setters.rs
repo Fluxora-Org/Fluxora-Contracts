@@ -743,6 +743,33 @@ fn test_load_policy_reflects_batch_cap_toggle() {
     );
 }
 
+/// Toggling the batch-cap policy must not rewrite any unrelated factory
+/// policy. This guards the public setter's narrow state transition.
+#[test]
+fn test_batch_cap_toggle_preserves_other_policy_fields() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    factory.init(&admin, &stream_contract, &10_000, &100);
+    factory.set_cap(&20_000);
+    factory.set_min_duration(&200);
+    factory.set_batch_cap_enforcement(&false);
+
+    let before = factory.get_factory_config();
+    factory.set_batch_cap_enforcement(&true);
+    let after = factory.get_factory_config();
+
+    assert!(after.batch_cap_enforced);
+    assert_eq!(after.admin, before.admin);
+    assert_eq!(after.stream_contract, before.stream_contract);
+    assert_eq!(after.max_deposit, before.max_deposit);
+    assert_eq!(after.min_duration, before.min_duration);
+}
+
 /// `set_factory_paused` flips `creation_paused`, which is the very first
 /// semantic guard after the policy load on both creation paths.
 #[test]

@@ -111,6 +111,15 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("InvalidReferenceLength", 40),
     // --- Duration limits ---
     ("DurationTooLong", 41),
+    // --- Reference validation ---
+    ("InvalidReferenceLength", 40),
+    // --- Factory policy ---
+    ("FactoryPaused", 41),
+    ("DepositExceedsCap", 42),
+    ("DurationBelowMinimum", 43),
+    ("TokenNotAllowlisted", 44),
+    ("RateBelowMin", 45),
+    ("RateAboveMax", 46),
 ];
 
 /// The highest discriminant value in the fixture above.
