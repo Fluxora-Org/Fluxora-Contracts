@@ -32,6 +32,7 @@ use soroban_sdk::xdr::{
     Limits, ReadXdr, ScSpecEntry, ScSpecEventParamLocationV0, ScSpecTypeDef, StringM,
 };
 
+use super::common::Harness;
 use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
@@ -292,6 +293,8 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
+        function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),

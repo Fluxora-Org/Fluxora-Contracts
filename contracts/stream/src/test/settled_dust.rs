@@ -24,7 +24,10 @@ fn uneven_deposits_settle_without_touching_recipient_funds() {
 
             let sender_before = h.balance(&h.sender);
             let dust = h.client.reclaim_dust(&id);
-            assert!(dust >= 0 && dust <= 1, "deposit={deposit}, duration={duration}");
+            assert!(
+                dust >= 0 && dust <= 1,
+                "deposit={deposit}, duration={duration}"
+            );
             assert_eq!(dust, 0, "no sender residue after exact settlement");
             assert_eq!(h.balance(&h.sender), sender_before);
             assert_eq!(h.pool(), 0, "all deposited funds were accounted for");

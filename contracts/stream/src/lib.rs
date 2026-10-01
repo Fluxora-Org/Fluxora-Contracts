@@ -96,8 +96,6 @@ mod events;
 mod protocol_limits;
 mod storage;
 mod types;
-#[cfg(test)]
-mod protocol_limits;
 
 pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,

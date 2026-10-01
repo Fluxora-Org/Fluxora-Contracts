@@ -42,8 +42,8 @@ mod withdraw_events;
 // Issue #1839: withdrawing exactly the full withdrawable amount — the boundary
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
-mod withdraw_exact_balance;
 mod settled_dust;
+mod withdraw_exact_balance;
 
 // Stage 2
 mod auth;
@@ -159,6 +159,8 @@ mod top_up_withdraw_same_ledger;
 // Issue #1857 — the contract's token balance always covers the summed live
 // stream liability, asserted over randomized operation sequences.
 mod pool_liability_proptest;
+// Issue #1858 — no sequence of operations lets total payouts exceed the deposit.
+mod payout_conservation;
 // Issue #1852 — TTL extension on a stream at its minimum TTL floor.
 mod ttl_minimum_extension;
 // Issue #1850 — an id at or beyond `stream_count()` was never issued, and is
