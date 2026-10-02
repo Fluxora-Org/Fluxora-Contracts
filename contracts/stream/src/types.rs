@@ -380,6 +380,17 @@ impl Stream {
 /// supplied shares sum exactly to this value.
 pub const TOTAL_BPS: u32 = 10_000;
 
+/// Parameter for a single `withdraw_to` or `batch_withdraw_to` operation.
+///
+/// Carries the stream id and the destination address that will receive the
+/// tokens. The stream's own recipient must authorize the batch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawToParam {
+    pub stream_id: u64,
+    pub destination: Address,
+}
+
 /// Maximum number of recipients in a single split stream.
 ///
 /// Kept small to bound the footprint of `withdraw_share` (one

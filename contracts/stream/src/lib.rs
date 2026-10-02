@@ -109,7 +109,14 @@ pub use storage::{
 pub use types::op;
 pub use types::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
-    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+    Stream, StreamStatus, MAX_REFERENCE_LENGTH, WithdrawToParam,
+};
+
+// Re-export events for contract spec and test access
+pub use events::{
+    Cancelled, ContractHalted, ContractResumed, DelegateGranted, DelegateRevoked, HaltOperatorSet,
+    Paused, RecipientTransferred, Resumed, StreamCreated, StreamPaused, StreamToppedUp, TtlExtended,
+    Withdrawn, WithdrawalTo,
 };
 
 use soroban_sdk::{
@@ -2205,6 +2212,188 @@ impl FluxoraStream {
             &new_recipient,
         );
         Ok(())
+    }
+
+    /// Withdraw the available balance to a destination address.
+    ///
+    /// The stream's `recipient` must authorize the call. The `destination` can
+    /// be any address except the contract address itself. If `destination` equals
+    /// the stream's `recipient`, this behaves identically to `withdraw` except
+    /// the tokens are sent to `destination` instead of the recipient (which is
+    /// the same address).
+    ///
+    /// Returns the amount actually transferred. If the withdrawable balance is
+    /// zero, returns zero without emitting an event (parity with `withdraw`).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::Unauthorized`] — caller is not the stream's recipient.
+    /// * [`Error::StreamTerminated`] — stream is `Cancelled` or `Depleted`.
+    /// * [`Error::NothingToWithdraw`] — no withdrawable balance (live stream
+    ///   before cliff, or fully drawn).
+    /// * [`Error::InsufficientWithdrawable`] — explicit amount exceeds available.
+    /// * [`Error::InvalidAmount`] — explicit amount is zero or negative.
+    /// * [`Error::InvalidDestination`] — destination is the contract address.
+    /// * [`Error::ContractHalted`] — contract-level emergency halt is engaged.
+    pub fn withdraw_to(
+        env: Env,
+        stream_id: u64,
+        destination: Address,
+    ) -> Result<i128, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+
+        // Reject contract address as destination to prevent accidental lock-up
+        if destination == env.current_contract_address() {
+            return Err(Error::InvalidDestination);
+        }
+
+        stream.recipient.require_auth();
+
+        let now = env.ledger().timestamp();
+        let available = accrual::withdrawable(&stream, now)?;
+        if available == 0 {
+            if stream.status.is_terminal() {
+                return Err(Error::StreamTerminated);
+            }
+            return Err(Error::NothingToWithdraw);
+        }
+
+        let payout = available;
+
+        Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+        // Reconcile the pool against the token's real balance now the payout
+        // has left it. A rebase between this token's last operation and this
+        // one shows up as a shortfall and rolls the withdrawal back
+        // (`Error::PoolBalanceDrift`) instead of letting the pool drift further.
+        verify_pool_balance(&env, &stream.token)?;
+
+        events::withdrawal_to(&env, stream_id, &stream, &destination, payout);
+        Ok(payout)
+    }
+
+    /// Withdraw the full available balance from several streams to their
+    /// respective destinations in one atomic call.
+    ///
+    /// All streams must share the same `recipient`, who authorizes once for the
+    /// whole batch. Each element specifies a `stream_id` and a `destination`
+    /// address. The `destination` can differ per stream and must not be the
+    /// contract address.
+    ///
+    /// Streams with nothing currently withdrawable are skipped rather than
+    /// failing the batch. Returns the total transferred across all streams;
+    /// per-stream amounts are available from the individual `withdrawal_to`
+    /// events, which are emitted in batch order.
+    ///
+    /// Streams need not share a token — each payout uses its own stream's token.
+    ///
+    /// **Atomicity: the batch is all-or-nothing.** Any error — an unknown id, a
+    /// stream belonging to a different recipient, a duplicate id, or an invalid
+    /// destination — reverts the *entire* call, including payouts already
+    /// applied to earlier streams in the batch. No accounting is written, no
+    /// tokens move, and no event is observable. A failed batch leaves the
+    /// caller free to retry with a corrected id list; duplicates are rejected
+    /// deterministically ([`Error::DuplicateStreamId`]) no matter where in the
+    /// batch they sit.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::EmptyBatch`] — no elements were supplied.
+    /// * [`Error::BatchTooLarge`] — more than [`MAX_BATCH_SIZE`] elements.
+    /// * [`Error::MalformedStreamId`] — a serialized vector element is not a
+    ///   valid `WithdrawToParam`.
+    /// * [`Error::DuplicateStreamId`] — the same stream id appears twice.
+    /// * [`Error::StreamNotFound`] — one of the ids does not exist.
+    /// * [`Error::Unauthorized`] — one of the streams has a different recipient.
+    /// * [`Error::StreamTerminated`] — one of the streams is `Cancelled` or
+    ///   `Depleted` with nothing withdrawable.
+    /// * [`Error::NothingToWithdraw`] — all streams in the batch have zero
+    ///   withdrawable balance (this is not an error, the batch returns 0).
+    /// * [`Error::InvalidDestination`] — one of the destinations is the
+    ///   contract address.
+    /// * [`Error::ContractHalted`] — contract-level emergency halt is engaged.
+    pub fn batch_withdraw_to(
+        env: Env,
+        recipient: Address,
+        withdrawals: Vec<WithdrawToParam>,
+    ) -> Result<i128, Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
+
+        if withdrawals.is_empty() {
+            return Err(Error::EmptyBatch);
+        }
+        if withdrawals.len() > MAX_BATCH_SIZE as u32 {
+            return Err(Error::BatchTooLarge);
+        }
+
+        // Validate and deduplicate stream IDs
+        let mut stream_ids: Vec<u64> = Vec::new(&env);
+        for param in withdrawals.iter() {
+            stream_ids.push_back(param.stream_id);
+        }
+        let stream_ids = Self::validate_batch_ids(&env, &stream_ids)?;
+        Self::reject_duplicate_ids(&stream_ids)?;
+
+        recipient.require_auth();
+
+        let now = env.ledger().timestamp();
+        let mut streams = Vec::new(&env);
+        let mut destinations = Vec::new(&env);
+        let mut payouts = Vec::new(&env);
+        let mut total: i128 = 0;
+
+        // Resolve and validate the entire batch before changing storage or
+        // calling any token contract.
+        for param in withdrawals.iter() {
+            let stream = storage::peek_stream(&env, param.stream_id)?;
+            if stream.recipient != recipient {
+                return Err(Error::Unauthorized);
+            }
+
+            // Reject contract address as destination
+            if param.destination == env.current_contract_address() {
+                return Err(Error::InvalidDestination);
+            }
+
+            let available = accrual::withdrawable(&stream, now)?;
+            total = total.checked_add(available).ok_or(Error::Overflow)?;
+            streams.push_back(stream);
+            destinations.push_back(param.destination);
+            payouts.push_back(available);
+        }
+
+        for i in 0..stream_ids.len() {
+            let stream_id = stream_ids.get_unchecked(i);
+            let mut stream = streams.get_unchecked(i);
+            let destination = destinations.get_unchecked(i);
+            let payout = payouts.get_unchecked(i);
+
+            if payout == 0 {
+                storage::extend_stream(&env, stream_id, &stream);
+            } else {
+                Self::apply_withdrawal(&env, stream_id, &mut stream, payout)?;
+                events::withdrawal_to(&env, stream_id, &stream, &destination, payout);
+            }
+        }
+
+        // Reconcile every token the batch touched, now that all payouts have
+        // left the pool. Deduplicated by token: a batch may hold several
+        // streams on one token (the payroll case), and one `balance`
+        // sub-invocation per stream would spend the instruction budget on
+        // repeated answers to the same question.
+        let mut reconciled: Vec<Address> = Vec::new(&env);
+        for stream in streams.iter() {
+            let token = stream.token.clone();
+            if !reconciled.contains(&token) {
+                verify_pool_balance(&env, &token)?;
+                reconciled.push_back(token);
+            }
+        }
+
+        Ok(total)
     }
 
     // ---------------------------------------------------------------------

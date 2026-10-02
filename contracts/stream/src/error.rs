@@ -185,6 +185,10 @@ pub enum Error {
     /// `transfer_recipient` to the current recipient.
     RepeatedTransfer = 30,
 
+    // --- Withdraw to destination ---
+    /// `withdraw_to` or `batch_withdraw_to` destination is the contract address.
+    InvalidDestination = 47,
+
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
     ///

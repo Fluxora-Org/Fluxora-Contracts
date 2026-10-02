@@ -1079,6 +1079,62 @@ fn delegate_resume_rejects_not_paused_and_terminal_streams() {
     assert_eq!(err, Error::StreamTerminated);
 }
 
+/// Positive: `delegate_resume` demands the delegate address that holds the grant.
+#[test]
+fn delegate_resume_requires_the_delegate() {
+    let h = Harness::new();
+    let agent = Address::generate(&h.env);
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::RESUME, &None);
+    h.client.delegate_pause(&id, &agent);
+    h.client.delegate_resume(&id, &agent);
+    assert_eq!(required_auth(&h.env), agent, "delegate_resume");
+}
+
+/// Negative: no authorization → rejected.
+#[test]
+#[should_panic(expected = "Unauthorized")]
+fn delegate_resume_fails_without_authorization() {
+    let h = Harness::new();
+    let agent = Address::generate(&h.env);
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(10 * DAY);
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::RESUME, &None);
+    h.client.delegate_pause(&id, &agent);
+
+    revoke_all_auths(&h.env);
+    h.client.delegate_resume(&id, &agent);
+}
+
+/// Storage-unchanged guard: `paused_at`, `paused_total`, and `status` are
+/// untouched after a rejected delegate_resume.
+#[test]
+fn rejected_delegate_resume_does_not_advance_paused_total_or_clear_paused_at() {
+    let h = Harness::new();
+    let agent = Address::generate(&h.env);
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &op::RESUME, &None);
+    h.client.delegate_pause(&id, &agent);
+    let paused_at_before = h.get(id).paused_at;
+
+    h.advance(10 * DAY);
+
+    revoke_all_auths(&h.env);
+    let _ = h.client.try_delegate_resume(&id, &agent);
+    h.env.mock_all_auths();
+
+    let s = h.get(id);
+    assert_eq!(s.status, crate::StreamStatus::Paused, "still paused");
+    assert_eq!(s.paused_at, paused_at_before, "paused_at not cleared");
+    assert_eq!(s.paused_total, 0, "paused_total not advanced");
+    h.assert_pool_exact();
+}
+
 #[test]
 fn delegate_top_up_guards_terminal_invalid_matured_and_sub_second() {
     let h = Harness::new();
