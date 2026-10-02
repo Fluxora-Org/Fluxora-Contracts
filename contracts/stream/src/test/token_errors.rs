@@ -811,9 +811,7 @@ impl FalseToken {
 
 /// Register a false-returning token, fund `sender`, and return
 /// `(token, client)`.
-pub(super) fn register_false_token<'a, 'b>(
-    h: &'a Harness<'b>,
-) -> (Address, FalseTokenClient<'a>) {
+pub(super) fn register_false_token<'a, 'b>(h: &'a Harness<'b>) -> (Address, FalseTokenClient<'a>) {
     let token = h.env.register(FalseToken, ());
     let client = FalseTokenClient::new(&h.env, &token);
     client.mint(&h.sender, &(10_000 * ONE));

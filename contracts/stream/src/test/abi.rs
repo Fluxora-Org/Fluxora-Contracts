@@ -301,7 +301,9 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
-        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream_via_factory())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_via_factory(),
+        )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_create())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_upgradeable())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reclaim_dust())),
@@ -332,9 +334,7 @@ fn current_inventory() -> Inventory {
             &FluxoraStream::spec_xdr_delegate_transfer_recipient(),
         )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reduce_stream())),
-        function_from_spec(parse_spec(
-            &FluxoraStream::spec_xdr_delegate_reduce_stream(),
-        )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_reduce_stream())),
         // Contract-level emergency halt (#1818).
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_set_halt_operator())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt())),

@@ -1,0 +1,36 @@
+{
+  "event": "StreamReduced",
+  "topic": "stream_reduced",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "amount",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "deposited",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "end_time",
+      "type": "u64",
+      "topic": false
+    }
+  ]
+}

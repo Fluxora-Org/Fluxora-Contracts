@@ -42,8 +42,8 @@ mod withdraw_events;
 // Issue #1839: withdrawing exactly the full withdrawable amount — the boundary
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
-mod withdraw_exact_balance;
 mod settled_dust;
+mod withdraw_exact_balance;
 
 // Stage 2
 mod auth;

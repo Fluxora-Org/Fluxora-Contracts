@@ -22,7 +22,9 @@ fn factory_error_discriminants_are_pinned_and_unique() {
 
     for (index, code) in discriminants.iter().enumerate() {
         assert!(
-            discriminants[..index].iter().all(|previous| previous != code),
+            discriminants[..index]
+                .iter()
+                .all(|previous| previous != code),
             "FactoryError discriminant {code} is duplicated"
         );
     }
