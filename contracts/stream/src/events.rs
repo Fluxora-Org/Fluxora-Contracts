@@ -336,6 +336,27 @@ pub struct ContractResumed {
     pub halted_for: u64,
 }
 
+/// Withdrawal to a destination address (different from the stream's recipient).
+///
+/// Mirrors the Withdrawn event but carries the destination that received the
+/// tokens. Emitted by `withdraw_to` and `batch_withdraw_to`.
+#[contractevent]
+pub struct WithdrawalTo {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub recipient: Address,
+    #[topic]
+    pub destination: Address,
+    pub amount: i128,
+    pub withdrawn: i128,
+    pub deposited: i128,
+    pub status: StreamStatus,
+    pub sender: Address,
+    pub paused_at: Option<u64>,
+    pub paused_total: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Emission helpers
 // ---------------------------------------------------------------------------
@@ -416,6 +437,32 @@ pub fn paused(env: &Env, stream_id: u64, stream: &Stream, paused_at: u64) {
         paused_at,
         paused_total: stream.paused_total,
         recipient: stream.recipient.clone(),
+    }
+    .publish(env);
+}
+
+pub fn withdrawal_to(
+    env: &Env,
+    stream_id: u64,
+    stream: &Stream,
+    destination: &Address,
+    amount: i128,
+) {
+    if amount == 0 {
+        return;
+    }
+    assert!(amount > 0, "withdrawal_to amount must be positive");
+    WithdrawalTo {
+        stream_id,
+        recipient: stream.recipient.clone(),
+        destination: destination.clone(),
+        amount,
+        withdrawn: stream.withdrawn,
+        deposited: stream.deposited,
+        status: stream.status,
+        sender: stream.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     }
     .publish(env);
 }
