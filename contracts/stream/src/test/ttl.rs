@@ -28,7 +28,7 @@ use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
-use crate::{storage, DataKey, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT};
+use crate::{storage, DataKey, TTL_BUFFER_SECONDS};
 
 #[test]
 fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {

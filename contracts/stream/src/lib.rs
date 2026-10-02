@@ -96,8 +96,6 @@ mod events;
 mod protocol_limits;
 mod storage;
 mod types;
-#[cfg(test)]
-mod protocol_limits;
 
 pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
@@ -546,7 +544,6 @@ impl FluxoraStream {
         reference: Option<String>,
     ) -> Result<u64, Error> {
         sender.require_auth();
-
         Self::create_stream_inner(
             env,
             sender,
@@ -654,6 +651,7 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        sender.require_auth();
         Self::create_stream_inner(
             env,
             sender,
@@ -698,7 +696,6 @@ impl FluxoraStream {
     ) -> Result<u64, Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
         Self::require_not_halted(&env)?;
-        sender.require_auth();
 
         if sender == recipient {
             return Err(Error::SelfStream);
@@ -955,6 +952,7 @@ impl FluxoraStream {
         }
 
         // All policy checks passed — create the stream normally.
+        sender.require_auth();
         Self::create_stream_inner(
             env,
             sender,
@@ -1623,6 +1621,195 @@ impl FluxoraStream {
         Ok(amount)
     }
 
+    // ---------------------------------------------------------------------
+    // Partial cancellation (#1814)
+    // ---------------------------------------------------------------------
+
+    /// Reclaim part of a stream's **unvested** principal without ending it.
+    ///
+    /// `amount` must be positive and no greater than the stream's current
+    /// refundable balance — everything deposited that has not vested yet.
+    /// Vested-but-unwithdrawn funds belong to the recipient and can never be
+    /// reclaimed by the sender; a sender who wants the entire remaining
+    /// commitment back must [`cancel`](Self::cancel) instead, which refunds the
+    /// unvested remainder and terminates the stream.
+    ///
+    /// # What happens to the schedule
+    ///
+    /// The stream keeps its identity and its already-vested amount. `deposited`
+    /// falls by exactly `amount`, and `end_time` is recomputed so that
+    /// `vested(now)` is unchanged: the reduced principal is spread over a
+    /// shorter schedule that preserves (or, at worst, slightly raises) the
+    /// recipient's claim at the reduction instant. Concretely the new end is the
+    /// largest `end' <= end` for which
+    ///
+    /// ```text
+    /// vested(new_deposited, end', now) >= vested(deposited, end, now)
+    /// ```
+    ///
+    /// with the same `start_time`, `cliff_time`, `cliff_mode` and
+    /// [`ReleaseCurve`]. Because `amount <= refundable`, the recipient's vested
+    /// amount can never decrease (invariant I3), and `refundable` falls by
+    /// `amount` (the resolved schedule is exact whenever the accrual divides
+    /// evenly; any integer-rounding residue is at most one stroop and always
+    /// favours the recipient). A stream whose entire unvested remainder is
+    /// reclaimed collapses onto the current point of the stream clock, exactly
+    /// as [`cancel`](Self::cancel) does, but stays `Active`/`Depleted` rather
+    /// than `Cancelled`.
+    ///
+    /// # Authorization and gating
+    ///
+    /// Sender-only, gated by the stream's immutable `cancellable` flag: a
+    /// stream created with `cancellable == false` cannot be reduced any more
+    /// than it can be cancelled. The [`op::REDUCE`] bit makes the operation
+    /// delegable through
+    /// [`delegate_reduce_stream`](Self::delegate_reduce_stream).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamTerminated`] — stream is cancelled or depleted.
+    /// * [`Error::NotCancellable`] — created with `cancellable == false`.
+    /// * [`Error::InvalidAmount`] — `amount <= 0`.
+    /// * [`Error::ReductionExceedsRefundable`] — `amount > refundable`; the
+    ///   requested principal has already vested and is not the sender's to
+    ///   reclaim.
+    /// * [`Error::Overflow`] — the recomputed schedule does not fit in `i128`.
+    /// * [`Error::TokenTransferFailed`] — the refund transfer was rejected.
+    /// * [`Error::TokenMissing`] — the stream's token contract is not registered.
+    pub fn reduce_stream(env: Env, stream_id: u64, amount: i128) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.sender.require_auth();
+        Self::apply_reduce(&env, stream_id, &mut stream, amount)
+    }
+
+    /// Delegate-gated twin of [`reduce_stream`](Self::reduce_stream).
+    ///
+    /// Requires `reducer` to hold a valid grant carrying [`op::REDUCE`] for
+    /// this stream. The refund still goes to the stream's sender; the delegate
+    /// only authorizes the call. See [`grant_delegate`](Self::grant_delegate)
+    /// for how the sender issues the grant.
+    pub fn delegate_reduce_stream(
+        env: Env,
+        stream_id: u64,
+        reducer: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        // Emergency halt (#1818): refuse state changes before anything else.
+        Self::require_not_halted(&env)?;
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        Self::check_delegate(&env, stream_id, &reducer, op::REDUCE)?;
+        Self::apply_reduce(&env, stream_id, &mut stream, amount)
+    }
+
+    /// Shared body of [`reduce_stream`](Self::reduce_stream) and
+    /// [`delegate_reduce_stream`](Self::delegate_reduce_stream), once
+    /// authorization has been established.
+    fn apply_reduce(
+        env: &Env,
+        stream_id: u64,
+        stream: &mut Stream,
+        amount: i128,
+    ) -> Result<(), Error> {
+        if stream.status.is_terminal() {
+            return Err(Error::StreamTerminated);
+        }
+        // Partial cancellation is a sender-side clawback, so it is gated by the
+        // same immutable flag as `cancel`.
+        if !stream.cancellable {
+            return Err(Error::NotCancellable);
+        }
+        if amount <= 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        let now = env.ledger().timestamp();
+        let vested_now = accrual::vested(stream, now)?;
+        let refundable_now = accrual::refundable(stream, now)?;
+        if amount > refundable_now {
+            return Err(Error::ReductionExceedsRefundable);
+        }
+
+        let new_deposited = stream
+            .deposited
+            .checked_sub(amount)
+            .ok_or(Error::Overflow)?;
+
+        // Recompute the end so `vested(now)` is preserved. See the entry-point
+        // docs for the exact property this solves for.
+        let new_duration = Self::solve_reduced_duration(stream, now, new_deposited, vested_now)?;
+        stream.deposited = new_deposited;
+        stream.end_time = stream
+            .start_time
+            .checked_add(new_duration)
+            .ok_or(Error::Overflow)?;
+
+        // Invariant I3: no entry point may lower the recipient's vested amount
+        // at a fixed instant. `solve_reduced_duration` is built to guarantee
+        // this; the guard is defence in depth, matching `top_up`.
+        if accrual::vested(stream, now)? < vested_now {
+            return Err(Error::VestedDecreased);
+        }
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        storage::save_stream(env, stream_id, stream);
+
+        if amount > 0 {
+            storage::debit_pool(env, &token, amount)?;
+            token_transfer(
+                env,
+                &token,
+                &env.current_contract_address(),
+                MuxedAddress::from(sender),
+                &amount,
+            )?;
+        }
+        // Reconcile the pool now the refund has left it, exactly as `cancel`
+        // does; a rebase since the last operation rolls the reduction back.
+        verify_pool_balance(env, &token)?;
+
+        events::reduced(env, stream_id, stream, amount);
+        Ok(())
+    }
+
+    /// Largest schedule duration `end' - start` in `1..=original` for which the
+    /// reduced deposit still vests at least `target_vested` at `now`.
+    ///
+    /// `vested` is non-increasing in the schedule duration for a fixed deposit
+    /// and a fixed instant, so the predicate is a monotone prefix and the
+    /// largest satisfying duration is found by binary search. Duration `1` is
+    /// always satisfying because `new_deposited >= target_vested`
+    /// (`amount <= refundable` guarantees it) and a one-second schedule is fully
+    /// vested. Pure: it clones the stream into a scratch buffer and calls only
+    /// [`accrual::vested`].
+    fn solve_reduced_duration(
+        stream: &Stream,
+        now: u64,
+        new_deposited: i128,
+        target_vested: i128,
+    ) -> Result<u64, Error> {
+        let mut probe = stream.clone();
+        probe.deposited = new_deposited;
+        let start = stream.start_time;
+        let mut hi = stream.end_time.saturating_sub(start).max(1);
+        let mut lo: u64 = 1;
+
+        while lo < hi {
+            // Upper mid, so the loop always makes progress.
+            let mid = lo + (hi - lo + 1) / 2;
+            probe.end_time = start.checked_add(mid).ok_or(Error::Overflow)?;
+            if accrual::vested(&probe, now)? >= target_vested {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Ok(lo)
+    }
+
     /// Pause accrual. Only the sender, and only if `pausable`.
     ///
     /// Pausing freezes the stream's clock and pushes the effective end date
@@ -1822,7 +2009,7 @@ impl FluxoraStream {
             return Err(Error::StreamTerminated);
         }
 
-        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+        let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP | op::REDUCE;
         let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
 
         // The grantor must be the party that owns the ops being delegated.

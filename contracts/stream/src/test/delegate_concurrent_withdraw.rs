@@ -89,6 +89,9 @@ fn assert_single_withdrawn_event(h: &Harness, stream_id: u64, payout: i128) {
         withdrawn: stream.withdrawn,
         deposited: stream.deposited,
         status: stream.status,
+        sender: stream.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     };
 
     assert_eq!(
@@ -274,6 +277,9 @@ fn concurrent_delegates_drain_to_depleted_in_one_ledger() {
         withdrawn: deposit,
         deposited: deposit,
         status: StreamStatus::Depleted,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     let published = published_by_stream(&h);
     assert_eq!(

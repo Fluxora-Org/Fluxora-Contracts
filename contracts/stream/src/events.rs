@@ -209,6 +209,30 @@ pub struct Cancelled {
     pub paused_total: u64,
 }
 
+/// The sender reclaimed part of the unvested principal without ending the
+/// stream (#1814).
+///
+/// The schedule is recomputed so the recipient's vested amount at the
+/// reduction instant is unchanged while `deposited` falls by exactly `amount`;
+/// the sender receives `amount` and the stream keeps running with a shorter
+/// schedule (or collapses to the current instant when the whole unvested
+/// remainder is reclaimed).
+#[contractevent]
+pub struct StreamReduced {
+    #[topic]
+    pub stream_id: u64,
+    #[topic]
+    pub sender: Address,
+    #[topic]
+    pub recipient: Address,
+    /// Unvested principal returned to the sender by this call.
+    pub amount: i128,
+    /// Post-reduction deposited total.
+    pub deposited: i128,
+    /// End of the recomputed schedule.
+    pub end_time: u64,
+}
+
 /// Accrual frozen.
 #[contractevent]
 pub struct Paused {
@@ -405,6 +429,23 @@ pub fn cancelled(env: &Env, stream_id: u64, stream: &Stream, refunded: i128) {
         end_time: stream.end_time,
         paused_at: stream.paused_at,
         paused_total: stream.paused_total,
+    }
+    .publish(env);
+}
+
+/// Emit [`StreamReduced`] after a partial cancellation has been committed.
+///
+/// `amount` is the unvested principal returned to the sender; `deposited` and
+/// `end_time` are read back off the already-rewritten stream so the event and
+/// storage can never disagree.
+pub fn reduced(env: &Env, stream_id: u64, stream: &Stream, amount: i128) {
+    StreamReduced {
+        stream_id,
+        sender: stream.sender.clone(),
+        recipient: stream.recipient.clone(),
+        amount,
+        deposited: stream.deposited,
+        end_time: stream.end_time,
     }
     .publish(env);
 }

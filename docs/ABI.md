@@ -415,13 +415,20 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
-| 34 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
 | 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
 | 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
 | 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
 | 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
 | 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
-| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
+| 39 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
+| 40 | `InvalidReferenceLength` | Reference string exceeds `MAX_REFERENCE_LENGTH`. | reachable |
+| 41 | `FactoryPaused` | `create_stream_via_factory` was called while the factory's creation pause is engaged. | reserved |
+| 42 | `DepositExceedsCap` | The deposit exceeds the factory's configured `max_deposit` cap. | reserved |
+| 43 | `DurationBelowMinimum` | The stream duration is shorter than the factory's `min_duration` floor. | reserved |
+| 44 | `TokenNotAllowlisted` | The token is not on the factory's allowlist. | reserved |
+| 45 | `RateBelowMin` | The per-second rate is below the factory's `min_rate_per_second` bound. | reserved |
+| 46 | `RateAboveMax` | The per-second rate exceeds the factory's `max_rate_per_second` bound. | reserved |
+| 47 | `ReductionExceedsRefundable` | `reduce_stream` was asked to reclaim more than the stream's unvested remainder. | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 

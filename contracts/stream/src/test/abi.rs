@@ -98,6 +98,9 @@ const AUTH: &[(&str, &str)] = &[
     ("create_stream", "sender"),
     ("create_stream_with_curve", "sender"),
     ("create_stream_with_cliff_mode", "sender"),
+    ("create_stream_via_factory", "sender"),
+    ("batch_create", "sender"),
+    ("upgradeable", "none"),
     ("top_up", "sender"),
     ("cancel", "sender"),
     ("reclaim_dust", "sender"),
@@ -115,6 +118,8 @@ const AUTH: &[(&str, &str)] = &[
     ("delegate_resume", "delegate"),
     ("delegate_top_up", "delegate"),
     ("delegate_transfer_recipient", "delegate"),
+    ("reduce_stream", "sender"),
+    ("delegate_reduce_stream", "delegate"),
     ("get_stream", "none"),
     ("withdrawable_of", "none"),
     ("vested_of", "none"),
@@ -292,8 +297,16 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
+        function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_via_factory(),
+        )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_create())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_upgradeable())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reclaim_dust())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_withdraw())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_withdraw())),
@@ -320,6 +333,8 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_delegate_transfer_recipient(),
         )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reduce_stream())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_delegate_reduce_stream())),
         // Contract-level emergency halt (#1818).
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_set_halt_operator())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt())),
@@ -407,6 +422,7 @@ fn frozen_v1() -> Inventory {
                 param("cancellable", "bool"),
                 param("pausable", "bool"),
                 param("transferable", "bool"),
+                param("reference", "Option<String>"),
             ],
             "Result<u64, Error>",
         ),
@@ -1408,6 +1424,7 @@ fn permissionless_methods_are_exactly_the_none_auth_set() {
     assert_eq!(
         none,
         [
+            "upgradeable",
             "get_stream",
             "withdrawable_of",
             "vested_of",
@@ -1435,6 +1452,8 @@ fn missing_stream_failure_is_stream_not_found_discriminant_one() {
 
 #[test]
 fn oversized_batch_failure_is_batch_too_large_discriminant_nineteen() {
+    use super::common::*;
+
     let h = Harness::new();
     let ids: std::vec::Vec<u64> = (0..17).collect();
     let err = h
@@ -1489,14 +1508,18 @@ fn release_curve_is_visible_across_the_generated_spec() {
         &param("curve", "ReleaseCurve"),
         "the curve must be the trailing parameter"
     );
-    // `create_stream` is untouched: same inputs, still ending in `bool`.
+    // `create_stream` gained a trailing optional `reference`; it does not take
+    // a curve, so the two entry points are the same width.
     let plain = inv
         .functions
         .iter()
         .find(|f| f.name == "create_stream")
         .unwrap();
-    assert_eq!(plain.inputs.len(), create_with_curve.inputs.len() - 1);
-    assert_eq!(plain.inputs.last().unwrap(), &param("transferable", "bool"));
+    assert_eq!(plain.inputs.len(), create_with_curve.inputs.len());
+    assert_eq!(
+        plain.inputs.last().unwrap(),
+        &param("reference", "Option<String>")
+    );
 
     let stream = inv.types.iter().find(|t| t.name == "Stream").unwrap();
     assert!(
@@ -1536,9 +1559,16 @@ fn release_curve_is_visible_across_the_generated_spec() {
         .iter()
         .find(|e| e.name == "StreamCreated")
         .unwrap();
+    assert!(
+        created
+            .data
+            .iter()
+            .any(|p| p.name == "curve" && p.type_name == "ReleaseCurve"),
+        "the curve must be carried on the StreamCreated payload"
+    );
     assert_eq!(
         created.data.last().unwrap(),
-        &param("curve", "ReleaseCurve"),
-        "the curve must be appended to the StreamCreated payload"
+        &param("reference", "Option<String>"),
+        "the reference must be the trailing StreamCreated payload field"
     );
 }

@@ -53,6 +53,7 @@ fn stream_of(
         paused_total: 0,
         status: StreamStatus::Active,
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 

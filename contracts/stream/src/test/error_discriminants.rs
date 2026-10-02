@@ -116,13 +116,15 @@ pub(super) const DISCRIMINANT_FIXTURE: &[(&str, u32)] = &[
     ("TokenNotAllowlisted", 44),
     ("RateBelowMin", 45),
     ("RateAboveMax", 46),
+    // --- Partial cancellation (#1814) ---
+    ("ReductionExceedsRefundable", 47),
 ];
 
 /// The highest discriminant value in the fixture above.
 ///
 /// New variants must use `LAST_DISCRIMINANT + 1`. This constant is checked
 /// against the fixture length so a gap is caught immediately.
-const LAST_DISCRIMINANT: u32 = 46;
+const LAST_DISCRIMINANT: u32 = 47;
 
 /// Assert that the fixture has no gaps and ends at `LAST_DISCRIMINANT`.
 ///
@@ -197,7 +199,6 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
-        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
         ("ContractHalted", Error::ContractHalted as u32),
         (
             "HaltOperatorAlreadySet",
@@ -206,6 +207,21 @@ fn discriminant_fixture_matches_source() {
         ("HaltOperatorNotSet", Error::HaltOperatorNotSet as u32),
         ("ContractAlreadyHalted", Error::ContractAlreadyHalted as u32),
         ("ContractNotHalted", Error::ContractNotHalted as u32),
+        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
+        (
+            "InvalidReferenceLength",
+            Error::InvalidReferenceLength as u32,
+        ),
+        ("FactoryPaused", Error::FactoryPaused as u32),
+        ("DepositExceedsCap", Error::DepositExceedsCap as u32),
+        ("DurationBelowMinimum", Error::DurationBelowMinimum as u32),
+        ("TokenNotAllowlisted", Error::TokenNotAllowlisted as u32),
+        ("RateBelowMin", Error::RateBelowMin as u32),
+        ("RateAboveMax", Error::RateAboveMax as u32),
+        (
+            "ReductionExceedsRefundable",
+            Error::ReductionExceedsRefundable as u32,
+        ),
     ];
 
     assert_eq!(
@@ -1210,7 +1226,7 @@ fn vested_decreased_discriminant_value() {
 fn pool_balance_drift_discriminant_value() {
     assert_eq!(
         Error::PoolBalanceDrift as u32,
-        34,
+        39,
         "PoolBalanceDrift discriminant must be 39",
     );
 }
