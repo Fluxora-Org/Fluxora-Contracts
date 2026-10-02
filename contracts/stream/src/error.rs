@@ -57,8 +57,6 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
-    /// Reference string exceeds maximum allowed length.
-    InvalidReferenceLength = 40,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -218,26 +216,6 @@ pub enum Error {
     /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
 
-    // --- Rebase detection ---
-    /// The pool's real token balance is short of the balance Fluxora has
-    /// accounted for.
-    ///
-    /// Fluxora keeps a per-token running total of the balance it expects to
-    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
-    /// payout and refund debits it — and reconciles that total against the
-    /// token's own `balance` at the end of every operation that moves pool
-    /// funds. A shortfall means the token changed balances outside a
-    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
-    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
-    /// invocation reverts instead of letting one recipient be paid out of
-    /// another's claim.
-    ///
-    /// A **surplus** is deliberately tolerated, never reported: a positive
-    /// rebase cannot cause an underpayment, and rejecting one would let any
-    /// third party freeze every withdrawal by dusting the contract with a
-    /// single unit. See `docs/ABI.md` "Token assumptions" and
-    /// `test::rebase_drift`.
-    PoolBalanceDrift = 39,
     // --- Contract-level emergency halt (#1818) ---
     /// A state-changing entry point was called while the contract-level halt
     /// is engaged.
@@ -267,6 +245,29 @@ pub enum Error {
     /// be a no-op.
     ContractNotHalted = 38,
 
+    // --- Rebase detection ---
+    /// The pool's real token balance is short of the balance Fluxora has
+    /// accounted for.
+    ///
+    /// Fluxora keeps a per-token running total of the balance it expects to
+    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
+    /// payout and refund debits it — and reconciles that total against the
+    /// token's own `balance` at the end of every operation that moves pool
+    /// funds. A shortfall means the token changed balances outside a
+    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
+    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
+    /// invocation reverts instead of letting one recipient be paid out of
+    /// another's claim.
+    ///
+    /// A **surplus** is deliberately tolerated, never reported: a positive
+    /// rebase cannot cause an underpayment, and rejecting one would let any
+    /// third party freeze every withdrawal by dusting the contract with a
+    /// single unit. See `docs/ABI.md` "Token assumptions" and
+    /// `test::rebase_drift`.
+    PoolBalanceDrift = 39,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 40,
+
     // --- Factory policy ---
     /// `create_stream_via_factory` was called while the factory's creation
     /// pause is engaged. The factory admin must unpause before new
@@ -282,4 +283,14 @@ pub enum Error {
     RateBelowMin = 45,
     /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
     RateAboveMax = 46,
+
+    // --- Partial cancellation (#1814) ---
+    /// `reduce_stream` was asked to reclaim more than the stream's unvested
+    /// remainder (`amount > refundable`).
+    ///
+    /// Vested-but-unwithdrawn funds belong to the recipient and are never
+    /// reclaimable by the sender. A sender who wants the whole remaining
+    /// commitment back must [`crate::FluxoraStream::cancel`] the stream, which
+    /// refunds exactly the unvested remainder and terminates it.
+    ReductionExceedsRefundable = 47,
 }

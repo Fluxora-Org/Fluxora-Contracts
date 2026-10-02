@@ -31,7 +31,7 @@ use soroban_sdk::{xdr, Event as _};
 use super::common::*;
 use crate::events::StreamCreated;
 use crate::types::StreamRecord;
-use crate::{accrual, DataKey, ReleaseCurve, StreamStatus};
+use crate::{accrual, CliffMode, DataKey, ReleaseCurve, StreamStatus};
 
 /// Every curve under test. Adding a variant to [`ReleaseCurve`] and forgetting
 /// this list fails `every_curve_is_covered_by_the_test_matrix`.
@@ -96,6 +96,8 @@ fn expected_created(h: &Harness, id: u64, curve: ReleaseCurve) -> xdr::ContractE
         pausable: s.pausable,
         transferable: s.transferable,
         curve,
+        cliff_mode: s.cliff_mode,
+        reference: s.reference.clone(),
     }
     .to_xdr(&h.env, &h.contract_id)
 }
@@ -611,12 +613,14 @@ fn a_v1_record_with_no_side_car_reads_back_as_linear() {
         start_time: start,
         end_time: start + duration,
         cliff_time: start,
+        cliff_mode: CliffMode::DEFAULT,
         cancellable: true,
         pausable: true,
         transferable: true,
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        reference: None,
     };
     let id = 7u64;
     h.env.as_contract(&h.contract_id, || {

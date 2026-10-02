@@ -17,6 +17,9 @@ pub mod op {
     pub const RESUME: u32 = 1 << 3;
     pub const TOP_UP: u32 = 1 << 4;
     pub const TRANSFER_RECIPIENT: u32 = 1 << 5;
+    /// Partial cancellation: reclaim part of the unvested principal while
+    /// leaving the stream running (#1814). Sender-side.
+    pub const REDUCE: u32 = 1 << 6;
 }
 
 /// A delegation grant stored in persistent storage.
@@ -286,12 +289,18 @@ pub struct StreamRecord {
     pub start_time: u64,
     pub end_time: u64,
     pub cliff_time: u64,
+    pub cliff_mode: CliffMode,
     pub cancellable: bool,
     pub pausable: bool,
     pub transferable: bool,
     pub paused_at: Option<u64>,
     pub paused_total: u64,
     pub status: StreamStatus,
+    /// Optional reference string for stream identification.
+    ///
+    /// Set at creation and never mutable. Maximum length is
+    /// [`MAX_REFERENCE_LENGTH`] characters.
+    pub reference: Option<String>,
 }
 
 /// One element in an atomic payroll-style stream creation batch.
@@ -321,12 +330,14 @@ impl StreamRecord {
             start_time: stream.start_time,
             end_time: stream.end_time,
             cliff_time: stream.cliff_time,
+            cliff_mode: stream.cliff_mode,
             cancellable: stream.cancellable,
             pausable: stream.pausable,
             transferable: stream.transferable,
             paused_at: stream.paused_at,
             paused_total: stream.paused_total,
             status: stream.status,
+            reference: stream.reference.clone(),
         }
     }
 
@@ -341,17 +352,17 @@ impl StreamRecord {
             start_time: self.start_time,
             end_time: self.end_time,
             cliff_time: self.cliff_time,
+            cliff_mode: self.cliff_mode,
             cancellable: self.cancellable,
             pausable: self.pausable,
             transferable: self.transferable,
             paused_at: self.paused_at,
             paused_total: self.paused_total,
             status: self.status,
-            // Neither of these is part of the frozen v1 record, so a stream
-            // decoded from storage takes the pre-feature defaults.
-            cliff_mode: CliffMode::DEFAULT,
+            // The curve is not part of the stored record, so it is attached
+            // from the side-car entry.
             curve,
-            reference: None,
+            reference: self.reference,
         }
     }
 }

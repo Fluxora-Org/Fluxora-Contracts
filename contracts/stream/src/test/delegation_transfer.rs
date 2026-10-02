@@ -111,6 +111,7 @@ fn withdraw_delegate_pays_new_recipient_after_transfer() {
         stream_id: id,
         old_recipient: h.recipient.clone(),
         new_recipient: new_recipient.clone(),
+        sender: h.sender.clone(),
     };
     assert_eq!(
         transfer_events[0],
@@ -188,6 +189,9 @@ fn withdraw_delegate_pays_new_recipient_after_transfer() {
         withdrawn: stream_final.withdrawn,
         deposited: stream_final.deposited,
         status: stream_final.status,
+        sender: stream_final.sender.clone(),
+        paused_at: stream_final.paused_at,
+        paused_total: stream_final.paused_total,
     };
     assert_eq!(
         withdraw_events[0],

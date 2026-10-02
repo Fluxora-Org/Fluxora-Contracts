@@ -59,7 +59,7 @@
 use std::format;
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::Env;
 
 use crate::types::{CliffMode, DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
@@ -517,6 +517,7 @@ fn deterministic_stream(env: &Env) -> Stream {
         paused_total: 0,
         status: StreamStatus::Active,
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 
@@ -862,8 +863,10 @@ fn v1_layout_is_no_longer_decodable_and_that_is_deliberate() {
         .collect();
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
-    let decoded =
-        StreamRecord::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
+    // The stored [`StreamRecord`] grew `cliff_mode` and `reference` with the
+    // v1 -> v2 layout change, so the genuine v1 fixture is no longer decodable
+    // by either the record or the in-memory [`Stream`]. Decoding it is expected
+    // to fail (as a host trap, not a clean `Err`).
     // Note the failure mode: this is not a clean `Err`. Decoding a `Stream` that
     // is 14 fields long against a 15-field reader fails inside the host while
     // unpacking the map, and the SDK surfaces that as a panic. Either way the
@@ -894,8 +897,6 @@ fn v1_layout_is_no_longer_decodable_and_that_is_deliberate() {
 /// broke encoding in both directions would still pass the refusal test.
 #[test]
 fn v2_layout_round_trips() {
-    use soroban_sdk::xdr::{FromXdr, ToXdr};
-
     let env = Env::default();
     let stream = Stream {
         sender: soroban_sdk::Address::generate(&env),
@@ -913,6 +914,8 @@ fn v2_layout_round_trips() {
         paused_at: None,
         paused_total: 0,
         status: StreamStatus::Active,
+        curve: ReleaseCurve::Linear,
+        reference: None,
     };
 
     let bytes = stream.to_xdr(&env);
@@ -926,7 +929,7 @@ fn v2_layout_round_trips() {
 
     // No side-car in a v1 entry, so the stream is linear and vests exactly as
     // it always did.
-    let stream = decoded.into_stream(ReleaseCurve::Linear);
+    let stream = decoded;
     assert_eq!(stream.curve, ReleaseCurve::Linear);
     assert_eq!(stream.deposited, 1_000_000_000_000);
     assert_eq!(stream.end_time, 1_731_536_000);

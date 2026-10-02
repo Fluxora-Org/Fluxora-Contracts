@@ -27,7 +27,7 @@ use soroban_sdk::Event as _;
 
 use super::common::*;
 use crate::events::{StreamCreated, Withdrawn};
-use crate::{Error, StreamStatus};
+use crate::{CliffMode, Error, ReleaseCurve, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Fixture: the harness plus a token whose whole supply is `i128::MAX`
@@ -124,6 +124,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         cancellable: true,
         pausable: true,
         transferable: true,
+        curve: ReleaseCurve::Linear,
+        cliff_mode: CliffMode::DEFAULT,
+        reference: None,
     };
     assert_eq!(
         created,
@@ -181,6 +184,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         withdrawn: deposit,
         deposited: deposit,
         status: StreamStatus::Depleted,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     assert_eq!(
         drained,
