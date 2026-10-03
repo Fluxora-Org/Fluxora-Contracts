@@ -26,6 +26,14 @@
 //! | `top_up`         | `transfer` | `"topped_up"`  |
 //! | `create_stream`  | `transfer` | `"stream_created"` |
 //!
+//! | Test | Entry-point | Asserts |
+//! |---|---|---|
+//! | `failed_create_emits_no_created_event` | `create_stream` | no `"stream_created"` topic; stream counter unchanged |
+//! | `failed_withdraw_emits_no_withdrew_event` | `withdraw` | no `"withdrawn"` topic; event log length unchanged |
+//! | `failed_cancel_emits_no_cancelled_event` | `cancel` | no `"cancelled"` topic; event log length unchanged |
+//! | `failed_top_up_emits_no_top_up_event` | `top_up` | no `"topped_up"` topic; event log length unchanged |
+//! | `reverted_token_calls_surface_typed_errors` | all of the above | reverts surface typed `Error` values, not host panics |
+//!
 //! Each test:
 //! 1. Boots a streaming contract whose token mock **panics on every real
 //!    transfer** (non-zero amount).
