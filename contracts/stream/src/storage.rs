@@ -89,7 +89,10 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord, StreamShares};
+use crate::types::{
+    DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord, StreamShares,
+    MAX_DELEGATES_PER_STREAM,
+};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
