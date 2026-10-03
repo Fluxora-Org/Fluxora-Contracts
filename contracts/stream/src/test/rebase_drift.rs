@@ -435,6 +435,6 @@ fn pool_balance_drift_discriminant_value() {
     assert_eq!(
         Error::PoolBalanceDrift as u32,
         34,
-        "PoolBalanceDrift discriminant must be 34",
+        "PoolBalanceDrift discriminant must be 39",
     );
 }
