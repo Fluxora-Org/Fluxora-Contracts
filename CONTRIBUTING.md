@@ -85,7 +85,20 @@ cargo check -p fluxora-stream --no-default-features
 pip install pytest pytest-cov
 pytest tests/ --cov=script/ --cov-fail-under=50 -v --tb=short
 python3 script/validate-doc-alignment.py
+python3 script/verify_soroban_version.py
+
+# Event snapshot coverage gate (issue #1701): every #[contractevent] struct
+# must have a fixture under tests/fixtures/event_snapshots/events/. After an
+# intentional event change, regenerate and commit with:
+#   python3 script/check_event_snapshots.py --update
+python3 script/check_event_snapshots.py
 ```
+
+The Soroban SDK target is authoritative in `Cargo.toml` under
+`[workspace.dependencies].soroban-sdk`. To update it, edit that pin once and
+run `python3 script/update_soroban_version.py`; the script synchronizes
+`soroban_version.txt` and the SDK-major comment in `rust-toolchain.toml`. CI
+runs `script/verify_soroban_version.py` to reject drift among all three.
 
 `script/verify_rust_version.py` checks your installed `rustc` against the pin
 in `rust-toolchain.toml` (currently `1.97.1` per that file; CI's `lint` job
@@ -157,7 +170,7 @@ What a change to `contracts/stream` is expected to satisfy before review:
    related**, re-measure — don't adjust the number by feel. See §3.2 of
    `fluxora-build-spec.md` for how the batch cap was derived, and
    `contracts/stream/wasm-size-budget.env` for the size gate (currently
-   48,128 bytes baseline, 131,072 max).
+   75,159 bytes baseline, 131,072 max).
 6. **If you rename the package or the cdylib target**, update the canonical
    values in *both* `.github/workflows/ci.yml` (the `lint` and `packaging`
    jobs) and `contracts/stream/src/test/packaging.rs`
@@ -225,11 +238,12 @@ the failure output.
   failure or you've introduced a new one — don't assume today's `main` is
   fully green on these.
 - **The test-host's storage runs in recording mode**, so an expired
-  persistent entry is silently auto-restored during `cargo test`. This means
-  `test::ttl` proves the rent arithmetic but *not* the real-network recovery
-  flow — that's what `script/archival-canary.sh` and the archival probe are
-  for. Read `docs/KNOWN-LIMITATIONS.md` §1 before claiming TTL is "solved" by
-  a green suite.
+  persistent entry is silently auto-restored during `cargo test`. The live
+  network does the same, which the canary established on testnet on 2026-09-28,
+  so `test::ttl` is representative here — but read `docs/KNOWN-LIMITATIONS.md`
+  §1 before claiming TTL is "solved" by a green suite: what the suite does not
+  measure is what the automatic restoration *costs*, and that is what
+  `script/archival-canary.sh --round-trip` records.
 
 ## Before opening a PR
 

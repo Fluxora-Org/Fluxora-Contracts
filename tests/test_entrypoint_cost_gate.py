@@ -1,16 +1,21 @@
+import json
+
 import pytest
 
 from script import validate_gas
 from script.validate_gas import compare, entrypoints, parse_measurements
 
 
-def test_inventory_is_all_27_abi_entries():
+def test_inventory_is_all_33_abi_entries():
     names = entrypoints()
-    assert len(names) == 27
-    assert {"withdraw", "batch_withdraw", "delegate_withdraw"} <= names
-    # Issue #1817: the recipient acceptance gate adds three entry points.
-    assert {"create_stream_pending", "accept_stream", "decline_stream"} <= names
-
+    assert len(names) == 33
+    assert {
+        "withdraw",
+        "batch_withdraw",
+        "batch_cancel",
+        "delegate_withdraw",
+        "create_stream_with_cliff_mode",
+    } <= names
 
 def test_parse_rejects_duplicate_measurement():
     with pytest.raises(ValueError, match="duplicate"):
@@ -40,3 +45,14 @@ def test_gate_fails_and_publishes_report_for_withdraw_regression(tmp_path, monke
 
     assert validate_gas.main(["--measurements", str(measurements)]) == 1
     assert "| `withdraw` | 1000 | 1101 | 1100 | FAIL |" in report.read_text(encoding="utf-8")
+
+
+def test_committed_baseline_covers_every_entrypoint():
+    baseline = json.loads(validate_gas.BASELINE.read_text(encoding="utf-8"))
+    assert set(baseline) == entrypoints()
+    assert all(isinstance(value, int) and value > 0 for value in baseline.values())
+
+
+def test_baseline_is_codeowner_protected():
+    owners = (validate_gas.ROOT / ".github/CODEOWNERS").read_text(encoding="utf-8")
+    assert "/contracts/stream/entrypoint-cost-baseline.json" in owners

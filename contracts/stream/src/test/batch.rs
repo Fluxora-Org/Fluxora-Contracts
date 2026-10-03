@@ -158,6 +158,7 @@ fn a_mixed_batch_with_an_unauthorized_item_rolls_back_everything() {
         &true,
         &true,
         &true,
+        &None,
     );
     let second_valid = h.create_simple(100 * ONE, 100 * DAY);
     h.advance(10 * DAY);
@@ -205,6 +206,37 @@ fn an_already_withdrawn_stream_is_skipped_without_failing_the_batch() {
         100 * ONE,
         "already fully withdrawn"
     );
+    assert_eq!(h.get(pending).withdrawn, 10 * ONE);
+    h.assert_pool_exact();
+}
+
+/// Covers the terminal case where a stream is Cancelled and fully drawn (or never drawn).
+/// A single `withdraw` would return `StreamTerminated(14)`, but `batch_withdraw` skips it
+/// without failing the batch.
+#[test]
+fn a_cancelled_terminal_stream_is_skipped_without_failing_the_batch() {
+    let h = Harness::new();
+    let terminal = h.create_simple(100 * ONE, 100 * DAY);
+    let pending = h.create_simple(100 * ONE, 100 * DAY);
+
+    // Cancel the first stream immediately. It is now terminal (Cancelled) with 0 withdrawable.
+    h.client.cancel(&terminal);
+
+    h.advance(10 * DAY);
+
+    let total = h
+        .client
+        .batch_withdraw(&h.recipient, &h.ids(&[terminal, pending]));
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, 10 * ONE, "only the active stream pays");
+    assert_eq!(
+        events,
+        std::vec![pending],
+        "emits only for the active stream"
+    );
+    assert_eq!(h.get(terminal).status, crate::StreamStatus::Cancelled);
+    assert_eq!(h.get(terminal).withdrawn, 0);
     assert_eq!(h.get(pending).withdrawn, 10 * ONE);
     h.assert_pool_exact();
 }
@@ -292,6 +324,7 @@ fn a_batch_can_span_multiple_tokens() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     h.advance(50 * DAY);
@@ -564,6 +597,7 @@ fn an_unauthorized_stream_anywhere_reverts_the_whole_batch() {
             &true,
             &true,
             &true,
+            &None,
         );
         h.advance(30 * DAY);
 
@@ -835,6 +869,122 @@ fn duplicate_rejection_is_order_independent_for_balances_and_events() {
 // Retry behaviour
 // ---------------------------------------------------------------------------
 
+/// Regression for #1843. A batch containing the same stream id twice would,
+/// without the duplicate check, settle one stream twice within a single call:
+/// the resolution phase would load the stream's state once per occurrence, compute
+/// the withdrawable amount twice (on the same state), and sum both into the total.
+/// The mutation phase would then apply the first withdrawal, updating storage,
+/// but process the second occurrence against the stale copy loaded earlier —
+/// paying out the same balance again and violating funds conservation.
+///
+/// This test exercises the scenario end-to-end through the public ABI, asserting
+/// that the duplicate is rejected deterministically before any storage write or
+/// token movement, and that funds conservation holds: the returned error is
+/// `DuplicateStreamId`, no events are emitted, and all balances — sender,
+/// recipient, pool, and per-stream accounting — remain unchanged.
+#[test]
+fn batch_with_duplicate_stream_id_is_rejected_preventing_double_settlement() {
+    let h = Harness::new();
+
+    // Create a stream with a known accrued balance.
+    let stream_id = h.create_simple(100 * ONE, 100 * DAY);
+    h.advance(50 * DAY);
+
+    // At this point, the stream has accrued 50 * ONE and has never been withdrawn.
+    let withdrawable = h.client.withdrawable_of(&stream_id);
+    assert_eq!(
+        withdrawable,
+        50 * ONE,
+        "stream should have 50 tokens withdrawable"
+    );
+
+    // Capture all balances before the attempted batch.
+    let recipient_before = h.balance(&h.recipient);
+    let sender_before = h.balance(&h.sender);
+    let pool_before = h.pool();
+    let withdrawn_before = h.get(stream_id).withdrawn;
+
+    // Attempt a batch containing the same stream id twice.
+    // Without the duplicate check, this would:
+    // 1. Load the stream state twice in the resolution phase
+    // 2. Compute withdrawable = 50 * ONE for both occurrences
+    // 3. Sum total = 50 * ONE + 50 * ONE = 100 * ONE
+    // 4. Apply the first withdrawal: stream.withdrawn = 50 * ONE, payout 50 * ONE
+    // 5. Apply the second withdrawal on the stale copy: stream.withdrawn = 50 * ONE again, payout 50 * ONE again
+    // Result: recipient receives 100 * ONE from a stream that only holds 100 * ONE total,
+    // with 50 * ONE remaining unvested — a violation of funds conservation.
+    let err = h
+        .client
+        .try_batch_withdraw(&h.recipient, &h.ids(&[stream_id, stream_id]))
+        .unwrap_err()
+        .unwrap();
+
+    // The duplicate check rejects the batch before any mutation.
+    assert_eq!(
+        err,
+        Error::DuplicateStreamId,
+        "batch with duplicate id must be rejected"
+    );
+
+    // No events were emitted — the failed batch is invisible.
+    assert!(
+        withdrawn_event_ids(&h).is_empty(),
+        "failed batch must not emit any events"
+    );
+
+    // Funds conservation: all three balances are unchanged.
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance must not change on rejection"
+    );
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance must not change on rejection"
+    );
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance must not change on rejection"
+    );
+
+    // Per-stream accounting is untouched.
+    assert_eq!(
+        h.get(stream_id).withdrawn,
+        withdrawn_before,
+        "stream's withdrawn field must not change on rejection"
+    );
+    assert_eq!(
+        h.get(stream_id).status,
+        crate::StreamStatus::Active,
+        "stream status must remain Active"
+    );
+
+    // Demonstrate that a corrected batch (single occurrence) succeeds and pays
+    // exactly the accrued amount, not double.
+    let total = h.client.batch_withdraw(&h.recipient, &h.ids(&[stream_id]));
+    assert_eq!(
+        total,
+        50 * ONE,
+        "corrected batch pays exactly the accrued balance, once"
+    );
+    assert_eq!(
+        h.get(stream_id).withdrawn,
+        50 * ONE,
+        "stream's withdrawn field reflects a single payment"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before + 50 * ONE,
+        "recipient receives exactly the accrued balance"
+    );
+
+    // Final funds conservation check: pool liability equals the sum of all
+    // (deposited - withdrawn) across every stream.
+    h.assert_pool_exact();
+}
+
 /// A failed batch is a no-op, so retrying is safe: the identical bad batch
 /// fails identically every time, and the valid portion pays out in full as soon
 /// as the caller drops the bad id. Nothing was consumed, corrupted, or marked.
@@ -954,14 +1104,51 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
     let expected_total: i128 = expected_per_stream.iter().sum();
 
     let total = h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
-    // Read the events *before* any other contract invocation: the test host's
-    // `Events::all()` only retains the most recent invocation, so the token
-    // `balance` read below would otherwise replace the `withdrawn` events this
-    // assertion is about.
-    let event_ids = withdrawn_event_ids(&h);
+
+    // Capture the event log right away: any later contract call (the token
+    // balance read below, `h.get`) starts a fresh invocation and the batch's
+    // events are no longer observable from it. Same discipline as the sibling
+    // `a_successful_batch_emits_withdrawn_events_in_batch_order`.
+    let events = withdrawn_event_ids(&h);
+
     assert_eq!(total, expected_total);
+    assert_eq!(
+        events, ids,
+        "events emitted per stream, in exact batch order"
+    );
     assert_eq!(h.balance(&h.recipient), expected_total);
 
+    // Capture the batch's events before any other client call: `Events::all()`
+    // only retains the most recent invocation, so a balance read between the
+    // batch and this helper wipes the stream's own events (as it did when this
+    // read sat above the event assertion).
+    let event_ids = withdrawn_event_ids(&h);
+
+    assert_eq!(total, expected_total);
+
+    // Harvest the events here, before the `balance` read below: `Events::all()`
+    // reports only the most recent contract invocation, so querying the token
+    // contract in between would discard what the batch emitted.
+    let event_ids = withdrawn_event_ids(&h);
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+
+    // Assert events are emitted per stream, not per batch (in exact batch order).
+    // Capture events right away, before any other client calls clear the event list.
+    let events = withdrawn_event_ids(&h);
+
+    assert_eq!(total, expected_total);
+
+    // Capture contract events before any further cross-contract call: in the
+    // test host, invoking another contract (e.g. the token `balance` read
+    // below) rotates the recorded event buffer, so reading events afterwards
+    // observes nothing.
+    let event_ids = withdrawn_event_ids(&h);
+
+    assert_eq!(h.balance(&h.recipient), expected_total);
+
+    assert_eq!(events, ids);
     // Assert events are emitted per stream, not per batch (in exact batch order).
     assert_eq!(event_ids, ids);
 

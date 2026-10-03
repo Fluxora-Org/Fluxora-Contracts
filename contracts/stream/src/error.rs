@@ -15,6 +15,28 @@ use soroban_sdk::contracterror;
 /// only mutated after all validation and the token transfer succeed. If any
 /// phase fails, no ID is consumed and no count is incremented; stream IDs are
 /// therefore contiguous with no gaps.
+///
+/// ## Terminal stream statuses
+/// A stream reaches a terminal status when no further accrual or state change
+/// is possible. Two distinct terminal statuses exist, and callers must be able
+/// to tell them apart because they mean different things for retry logic:
+///
+/// - [`Error::StreamTerminated`] (discriminant 14) — the stream ended *early*.
+///   It is reached when the sender `cancel`s the stream (`Cancelled`) or when
+///   the recipient withdraws the exact withdrawable balance and the stream
+///   becomes `Depleted`. Both are permanent: the stream can never accrue or be
+///   resumed again.
+/// - [`Error::StreamMatured`] (discriminant 15) — the stream ended *naturally*.
+///   It is reached when the accrual clock has passed `end_time` and the full
+///   deposit has vested. This is also permanent, but it signals successful
+///   completion rather than an early stop.
+///
+/// Both terminal statuses are permanent, so a caller retrying a mutating
+/// operation must not retry blindly: it should branch on which variant was
+/// returned to distinguish an early stop from a natural completion.
+///
+/// [`StreamStatus::is_terminal`] covers exactly these two statuses
+/// (discriminants 14 and 15) and nothing else.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -35,6 +57,8 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 40,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -57,14 +81,24 @@ pub enum Error {
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
     StreamAlreadyPaused = 13,
-    /// Action attempted on a `Cancelled` or `Depleted` stream.
+    /// Action attempted on a stream that ended early: a `Cancelled` stream, or
+    /// a `Depleted` stream (the recipient withdrew the exact withdrawable
+    /// balance).
     ///
-    /// A stream is `Depleted` when the recipient withdraws the exact
-    /// withdrawable balance; subsequent withdrawals return this error.
+    /// This is a *terminal* status: the stream can never accrue or be resumed
+    /// again, so the error is permanent. It is distinguishable from
+    /// [`Self::StreamMatured`], which signals natural completion rather than an
+    /// early stop. Callers retrying a mutating operation must branch on which
+    /// of the two terminal variants was returned.
     StreamTerminated = 14,
-    /// `top_up` on a stream whose accrual clock has already reached `end_time`,
+    /// `top_up` on a stream whose accrual clock has already reached `end_time`.
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
+    ///
+    /// This is a *terminal* status: the stream completed naturally and the
+    /// full deposit has vested. Like [`Self::StreamTerminated`] it is
+    /// permanent, but it signals successful completion rather than an early
+    /// stop, so callers must be able to tell the two apart.
     StreamMatured = 15,
 
     // --- Withdrawal ---
@@ -184,19 +218,68 @@ pub enum Error {
     /// Classified as reserved in `test::error_reachability`.
     VestedDecreased = 33,
 
-    // --- Acceptance gate (issue #1817) ---
-    /// `accept_stream` or `decline_stream` was called on a stream that is not
-    /// `Pending`. A stream only enters `Pending` through
-    /// `create_stream_pending`; `create_stream` produces an `Active` stream
-    /// that has nothing to accept.
-    StreamNotPending = 34,
-    /// An operation that requires an accruing (or at least accepted) stream was
-    /// called while the stream is still `Pending`.
+    // --- Rebase detection ---
+    /// The pool's real token balance is short of the balance Fluxora has
+    /// accounted for.
     ///
-    /// A pending stream has not started: it accrues nothing, so `withdraw`,
-    /// `top_up`, `pause`, `resume` and `transfer_recipient` are all rejected
-    /// until the recipient accepts it. `cancel` is deliberately *not* in this
-    /// set — the sender must always be able to reclaim a deposit from a stream
-    /// the recipient never accepts.
-    StreamPending = 35,
+    /// Fluxora keeps a per-token running total of the balance it expects to
+    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
+    /// payout and refund debits it — and reconciles that total against the
+    /// token's own `balance` at the end of every operation that moves pool
+    /// funds. A shortfall means the token changed balances outside a
+    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
+    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
+    /// invocation reverts instead of letting one recipient be paid out of
+    /// another's claim.
+    ///
+    /// A **surplus** is deliberately tolerated, never reported: a positive
+    /// rebase cannot cause an underpayment, and rejecting one would let any
+    /// third party freeze every withdrawal by dusting the contract with a
+    /// single unit. See `docs/ABI.md` "Token assumptions" and
+    /// `test::rebase_drift`.
+    PoolBalanceDrift = 39,
+    // --- Contract-level emergency halt (#1818) ---
+    /// A state-changing entry point was called while the contract-level halt
+    /// is engaged.
+    ///
+    /// Only mutations are refused: every read method (`get_stream`,
+    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
+    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
+    /// integrators can still observe the chain during an incident.
+    ContractHalted = 34,
+    /// `set_halt_operator` was called after an operator was already installed.
+    ///
+    /// The setter is deliberately one-shot: there is no rotation entry point,
+    /// so a compromised operator cannot be replaced — it can only be halted by
+    /// deploying a new contract.
+    HaltOperatorAlreadySet = 35,
+    /// `halt` or `resume_contract` was called on a contract that has never had
+    /// a halt operator installed.
+    ///
+    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
+    /// has no operator and no way to engage it.
+    HaltOperatorNotSet = 36,
+    /// `halt` was called while the contract was already halted.
+    ContractAlreadyHalted = 37,
+    /// `resume_contract` was called while the contract was not halted.
+    ///
+    /// There is no timeout on the halt, so this is the only way a resume can
+    /// be a no-op.
+    ContractNotHalted = 38,
+
+    // --- Factory policy ---
+    /// `create_stream_via_factory` was called while the factory's creation
+    /// pause is engaged. The factory admin must unpause before new
+    /// factory-routed streams are accepted.
+    FactoryPaused = 41,
+    /// The deposit exceeds the factory's configured `max_deposit` cap.
+    DepositExceedsCap = 42,
+    /// The stream duration is shorter than the factory's `min_duration` floor.
+    DurationBelowMinimum = 43,
+    /// The token is not on the factory's allowlist.
+    TokenNotAllowlisted = 44,
+    /// The per-second rate is below the factory's `min_rate_per_second` bound.
+    RateBelowMin = 45,
+    /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
+    RateAboveMax = 46,
 }

@@ -7,7 +7,9 @@ use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 use soroban_sdk::{Address, Env, Vec};
 
-use crate::{accrual, storage, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus};
+use crate::{
+    accrual, storage, CliffMode, DataKey, FluxoraStream, FluxoraStreamClient, Stream, StreamStatus,
+};
 
 // ---------------------------------------------------------------------------
 // TestSnapshot — deterministic, credential-free state capture
@@ -80,6 +82,8 @@ pub struct StreamSnapshot {
     pub end_time: u64,
     /// Cliff gate (unix seconds).
     pub cliff_time: u64,
+    /// Which clock the cliff gate is read against.
+    pub cliff_mode: CliffMode,
     /// Cumulative seconds spent paused (excluding any in-progress pause).
     pub paused_total: u64,
     /// Freeze point if the stream is currently paused.
@@ -92,7 +96,7 @@ impl std::fmt::Display for StreamSnapshot {
             f,
             "stream[{id}]: status={status:?} \
              deposited={dep} withdrawn={wth} vested={vest} withdrawable={draw} \
-             start={start} end={end} cliff={cliff} \
+             start={start} end={end} cliff={cliff} cliff_mode={cmode:?} \
              paused_total={ptot}{paused_at}",
             id = self.id,
             status = self.status,
@@ -103,6 +107,7 @@ impl std::fmt::Display for StreamSnapshot {
             start = self.start_time,
             end = self.end_time,
             cliff = self.cliff_time,
+            cmode = self.cliff_mode,
             ptot = self.paused_total,
             paused_at = match self.paused_at {
                 Some(t) => std::format!(" paused_at={t}"),
@@ -201,13 +206,19 @@ impl<'a> Harness<'a> {
 
     /// Advance the ledger clock by `seconds`.
     ///
-    /// Also advances the sequence number at the nominal ledger close rate, so
-    /// that time-based tests exercise TTL decay realistically rather than
-    /// freezing the sequence while the clock runs.
+    /// Also advances the sequence number at the network's *nominal* close
+    /// cadence, so that time-based tests exercise TTL decay realistically
+    /// rather than freezing the sequence while the clock runs. The nominal
+    /// rate is deliberate: this simulates the network the contract runs on,
+    /// while [`storage::seconds_to_ledgers`] carries the funding margin on
+    /// the contract side. Deriving cadence from the margined conversion would
+    /// hide the very gap the margin exists to cover.
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
         self.env.ledger().set_timestamp(info.timestamp + seconds);
-        let ledgers = storage::seconds_to_ledgers(seconds);
+        let ledgers = seconds
+            .saturating_add(storage::SECONDS_PER_LEDGER - 1)
+            .saturating_div(storage::SECONDS_PER_LEDGER);
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));
@@ -272,6 +283,7 @@ impl<'a> Harness<'a> {
             &true,
             &true,
             &true,
+            &None,
         )
     }
 
@@ -344,6 +356,88 @@ impl<'a> Harness<'a> {
             &cancellable,
             &pausable,
             &transferable,
+            &None,
+        )
+    }
+
+    /// Create with reference support - simple case
+    pub fn create_simple_with_ref(
+        &self,
+        deposit: i128,
+        duration: u64,
+        reference: Option<soroban_sdk::String>,
+    ) -> u64 {
+        let start = self.now();
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &(start + duration),
+            &start,
+            &true,
+            &true,
+            &true,
+            &reference,
+        )
+    }
+
+    /// Create with reference support - full control
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_ref(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+        reference: Option<soroban_sdk::String>,
+    ) -> u64 {
+        self.client.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cancellable,
+            &pausable,
+            &transferable,
+            &reference,
+        )
+    }
+
+    /// Full control over every creation parameter, including which clock the
+    /// cliff gate is read against.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_cliff_mode(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cliff_mode: CliffMode,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> u64 {
+        self.client.create_stream_with_cliff_mode(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cliff_mode,
+            &cancellable,
+            &pausable,
+            &transferable,
+            &None,
         )
     }
 
@@ -450,17 +544,20 @@ impl<'a> Harness<'a> {
     /// Call this after every operation. It is the single most important
     /// assertion in the suite.
     pub fn assert_pool_invariant(&self) {
+        self.assert_pool_invariant_for(&self.token);
+    }
+
+    /// [`assert_pool_invariant`](Self::assert_pool_invariant) against a token
+    /// other than the harness's own.
+    ///
+    /// Tests that need a second asset — a dedicated supply, a different
+    /// issuer, a hostile token — still must assert the pool invariant on it,
+    /// but the harness-shaped check above is hard-wired to [`Harness::token`].
+    /// This is the same check with the token made explicit.
+    pub fn assert_pool_invariant_for(&self, token: &Address) {
         self.assert_invariants();
-        let mut total: i128 = 0;
-        let count = self.client.stream_count();
-        for id in 0..count {
-            let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
-                continue;
-            }
-            total += accrual::liability(&stream).expect("liability must not overflow");
-        }
-        let pool = self.pool();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
         assert!(
             pool >= total,
             "pool invariant violated: pooled balance {pool} < outstanding liability {total}",
@@ -474,21 +571,35 @@ impl<'a> Harness<'a> {
     /// true for every test that does not deliberately donate loose tokens to the
     /// contract.
     pub fn assert_pool_exact(&self) {
+        self.assert_pool_exact_for(&self.token);
+    }
+
+    /// [`assert_pool_exact`](Self::assert_pool_exact) against a token other
+    /// than the harness's own. See
+    /// [`assert_pool_invariant_for`](Self::assert_pool_invariant_for).
+    pub fn assert_pool_exact_for(&self, token: &Address) {
         self.assert_invariants();
+        let total = self.outstanding_liability(token);
+        let pool = TokenClient::new(&self.env, token).balance(&self.contract_id);
+        assert_eq!(
+            pool, total,
+            "pooled balance and outstanding liability diverged",
+        );
+    }
+
+    /// Sum of `deposited - withdrawn` across every stream denominated in
+    /// `token` (see [`accrual::liability`]).
+    fn outstanding_liability(&self, token: &Address) -> i128 {
         let mut total: i128 = 0;
         let count = self.client.stream_count();
         for id in 0..count {
             let stream = self.client.get_stream(&id);
-            if stream.token != self.token {
+            if stream.token != *token {
                 continue;
             }
             total += accrual::liability(&stream).expect("liability must not overflow");
         }
-        assert_eq!(
-            self.pool(),
-            total,
-            "pooled balance and outstanding liability diverged",
-        );
+        total
     }
 
     // -----------------------------------------------------------------------
@@ -554,6 +665,7 @@ impl<'a> Harness<'a> {
                     start_time: s.start_time,
                     end_time: s.end_time,
                     cliff_time: s.cliff_time,
+                    cliff_mode: s.cliff_mode,
                     paused_total: s.paused_total,
                     paused_at: s.paused_at,
                 }

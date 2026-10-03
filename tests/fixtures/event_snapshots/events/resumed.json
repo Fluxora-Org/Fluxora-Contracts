@@ -1,0 +1,31 @@
+{
+  "event": "Resumed",
+  "topic": "resumed",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "paused_duration",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "paused_total",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": false
+    }
+  ]
+}

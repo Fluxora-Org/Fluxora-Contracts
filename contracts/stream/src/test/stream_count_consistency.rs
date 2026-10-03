@@ -1,4 +1,4 @@
-//! Issue #1699 — assert `stream_count()` stays consistent with the streams
+//! Issue #1884/#1699 — assert `stream_count()` stays consistent with the streams
 //! that exist.
 //!
 //! The contract stores the same fact twice: the instance-level counter behind
@@ -51,6 +51,40 @@ use super::common::*;
 use super::create::seed_counter;
 use crate::{op, DataKey, Error, StreamStatus};
 
+fn assert_counter_entries_match(h: &Harness) {
+    h.env.as_contract(&h.contract_id, || {
+        let next: u64 = h
+            .env
+            .storage()
+            .instance()
+            .get(&DataKey::NextStreamId)
+            .unwrap_or(0);
+        let count: u64 = h
+            .env
+            .storage()
+            .instance()
+            .get(&DataKey::StreamCount)
+            .unwrap_or(0);
+        assert_eq!(next, count, "NextStreamId and StreamCount diverged");
+    });
+}
+
+/// Issue #1884: the two instance counters remain equal across a generated
+/// sequence of successful and rejected creations.
+#[test]
+fn next_stream_id_and_stream_count_stay_equal_across_mixed_creations() {
+    let h = Harness::new();
+    for round in 0..32u64 {
+        if round % 3 == 0 {
+            reject_self_stream(&h);
+        } else {
+            h.create_simple(100 * ONE, DAY + round);
+        }
+        assert_counter_entries_match(&h);
+        assert_eq!(h.client.stream_count(), round - round / 3);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Failed-creation fixtures
 // ---------------------------------------------------------------------------
@@ -73,6 +107,7 @@ fn reject_self_stream(h: &Harness) {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -97,6 +132,7 @@ fn reject_unaffordable_deposit(h: &Harness) {
         &true,
         &true,
         &true,
+        &None,
     );
     assert!(
         result.is_err(),
@@ -347,6 +383,7 @@ fn a_terminal_operation_failing_partway_leaves_counter_and_population_agreeing()
         &true,
         &true,
         &true,
+        &None,
     );
     h.assert_stream_count_consistent();
 

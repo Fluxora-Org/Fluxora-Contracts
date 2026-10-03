@@ -76,7 +76,7 @@ enum Account {
 /// Kept as a value so the tests can iterate it. `names_and_discriminants_match_the_abi_fixture`
 /// pins its length to `DISCRIMINANT_FIXTURE`, which is itself pinned to
 /// `LAST_DISCRIMINANT`, so dropping an entry here fails the suite.
-const ALL: [Error; 35] = [
+const ALL: [Error; 46] = [
     Error::StreamNotFound,
     Error::InvalidTimeRange,
     Error::InvalidCliff,
@@ -110,14 +110,25 @@ const ALL: [Error; 35] = [
     Error::InvalidTopUp,
     Error::TokenAmountMismatch,
     Error::VestedDecreased,
-    Error::StreamNotPending,
-    Error::StreamPending,
+    Error::ContractHalted,
+    Error::HaltOperatorAlreadySet,
+    Error::HaltOperatorNotSet,
+    Error::ContractAlreadyHalted,
+    Error::ContractNotHalted,
+    Error::PoolBalanceDrift,
+    Error::InvalidReferenceLength,
+    Error::FactoryPaused,
+    Error::DepositExceedsCap,
+    Error::DurationBelowMinimum,
+    Error::TokenNotAllowlisted,
+    Error::RateBelowMin,
+    Error::RateAboveMax,
 ];
 
 /// Frozen allowlist of discriminants that have no reaching test, in ascending
 /// order. Every entry must carry a reason in [`describe`] and a matching line
 /// in `docs/ABI.md` "Error".
-const RESERVED_DISCRIMINANTS: [u32; 5] = [11, 26, 29, 31, 33];
+const RESERVED_DISCRIMINANTS: [u32; 11] = [11, 26, 29, 31, 33, 41, 42, 43, 44, 45, 46];
 
 /// Name, discriminant, and account for a variant.
 ///
@@ -150,6 +161,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -172,6 +184,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -194,6 +207,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -216,6 +230,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -238,6 +253,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -432,6 +448,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -468,6 +485,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -496,6 +514,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -603,6 +622,7 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                         &true,
                         &true,
                         &true,
+                        &None,
                     )
                     .unwrap_err()
                     .unwrap()
@@ -619,8 +639,154 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                  mutation those four paths can make — pause/resume keep elapsed \
                  time identical, `top_up` scales numerator and denominator \
                  together, and a recipient change does not enter the formula — \
-                 so 33 is unreachable. The guard stays because the invariant it \
-                 protects is load-bearing.",
+                 so 33 is unreachable. `test::vested_decreased` searches \
+                 randomized operation sequences against paused, cliffed and \
+                 near-maximum streams and confirms no trigger. The guard stays \
+                 because the invariant it protects is load-bearing.",
+            ),
+        ),
+
+        // --- Rebase detection -------------------------------------------------------------------
+        Error::PoolBalanceDrift => (
+            "PoolBalanceDrift",
+            39,
+            Account::Reach(super::rebase_drift::drift_error),
+        ),
+
+        // --- Contract-level emergency halt (#1818) -------------------------------
+        Error::ContractHalted => (
+            "ContractHalted",
+            34,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.halt();
+                let now = h.now();
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(1_000 * ONE),
+                        &now,
+                        &(now + 10 * DAY),
+                        &now,
+                        &true,
+                        &true,
+                        &true,
+                        &None,
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::HaltOperatorAlreadySet => (
+            "HaltOperatorAlreadySet",
+            35,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client
+                    .try_set_halt_operator(&h.sender)
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::HaltOperatorNotSet => (
+            "HaltOperatorNotSet",
+            36,
+            Account::Reach(|h| h.client.try_halt().unwrap_err().unwrap()),
+        ),
+        Error::ContractAlreadyHalted => (
+            "ContractAlreadyHalted",
+            37,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.halt();
+                h.client.try_halt().unwrap_err().unwrap()
+            }),
+        ),
+        Error::ContractNotHalted => (
+            "ContractNotHalted",
+            38,
+            Account::Reach(|h| {
+                h.client.set_halt_operator(&h.sender);
+                h.client.try_resume_contract().unwrap_err().unwrap()
+            }),
+        ),
+        Error::InvalidReferenceLength => (
+            "InvalidReferenceLength",
+            40,
+            Account::Reach(|h| {
+                let now = h.now();
+                let long_ref = soroban_sdk::String::from_str(
+                    &h.env,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                );
+                h.client
+                    .try_create_stream(
+                        &h.sender,
+                        &h.recipient,
+                        &h.token,
+                        &(1_000 * ONE),
+                        &now,
+                        &(now + DAY),
+                        &now,
+                        &true,
+                        &true,
+                        &true,
+                        &Some(long_ref),
+                    )
+                    .unwrap_err()
+                    .unwrap()
+            }),
+        ),
+        Error::FactoryPaused => (
+            "FactoryPaused",
+            41,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when the factory's \
+                 creation_paused flag is set. Covered by \
+                 test::factory_policy_enforcement::factory_pause_blocks_creation.",
+            ),
+        ),
+        Error::DepositExceedsCap => (
+            "DepositExceedsCap",
+            42,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when deposit > max_deposit. \
+                 Covered by test::factory_policy_enforcement::deposit_above_cap_is_rejected.",
+            ),
+        ),
+        Error::DurationBelowMinimum => (
+            "DurationBelowMinimum",
+            43,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when duration < min_duration. \
+                 Covered by test::factory_policy_enforcement::duration_below_minimum_is_rejected.",
+            ),
+        ),
+        Error::TokenNotAllowlisted => (
+            "TokenNotAllowlisted",
+            44,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when the token is absent from \
+                 the factory allowlist. Covered by \
+                 test::factory_policy_enforcement::unlisted_token_is_rejected.",
+            ),
+        ),
+        Error::RateBelowMin => (
+            "RateBelowMin",
+            45,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when rate < min_rate_per_second. \
+                 Covered by test::factory_policy_enforcement::rate_below_minimum_is_rejected.",
+            ),
+        ),
+        Error::RateAboveMax => (
+            "RateAboveMax",
+            46,
+            Account::Reserved(
+                "Only reachable via create_stream_via_factory when rate > max_rate_per_second. \
+                 Covered by test::factory_policy_enforcement::rate_above_maximum_is_rejected.",
             ),
         ),
 

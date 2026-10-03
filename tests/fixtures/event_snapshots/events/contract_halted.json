@@ -1,0 +1,16 @@
+{
+  "event": "ContractHalted",
+  "topic": "contract_halted",
+  "fields": [
+    {
+      "name": "operator",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "halted_at",
+      "type": "u64",
+      "topic": false
+    }
+  ]
+}

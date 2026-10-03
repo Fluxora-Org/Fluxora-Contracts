@@ -165,7 +165,7 @@ fn live_stream_with_once_token(
 
     // create_stream consumes the one allowed transfer.
     let stream_id = client.create_stream(
-        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true,
+        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true, &None,
     );
     (client, contract_id, token_id, stream_id)
 }
@@ -193,7 +193,7 @@ fn failed_create_emits_no_created_event() {
     let count_before = client.stream_count();
 
     let result = client.try_create_stream(
-        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true,
+        &sender, &recipient, &token_id, &1_000, &0, &1_000, &0, &true, &true, &true, &None,
     );
 
     assert!(result.is_err(), "create_stream must fail when pull panics");
