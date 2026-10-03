@@ -328,6 +328,26 @@ fn test_set_stream_contract_rejects_non_admin() {
     assert_auth_fails(|| factory.set_stream_contract(&new_sc));
 }
 
+/// The admin setter persists the new stream contract address in factory policy.
+#[test]
+fn test_set_stream_contract_updates_stored_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let original_sc = Address::generate(&env);
+    let new_sc = Address::generate(&env);
+    factory.init(&admin, &original_sc, &10_000, &100);
+
+    factory.set_stream_contract(&new_sc);
+
+    let policy: FactoryPolicy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load after updating the stream contract");
+    assert_eq!(policy.stream_contract, new_sc);
+}
+
 /// `set_cap` rejects a non-admin caller.
 #[test]
 fn test_set_cap_rejects_non_admin() {
