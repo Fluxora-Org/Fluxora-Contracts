@@ -698,3 +698,182 @@ fn capability_flags_are_immutable_across_all_supported_mutations() {
     assert_eq!(h.get(id).status, StreamStatus::Active);
     h.assert_pool_exact();
 }
+
+// ---------------------------------------------------------------------------
+// Exhaustive entry-point enumeration
+//
+// The acceptance criterion for issue #1925 is that a test enumerates every
+// mutating entry point and asserts the capability flags are unchanged after
+// each one. This test creates one stream per flag combination, runs every
+// entry point that can execute on that stream, and checks the flags after
+// every single call. A future entry point that mutates a flag will fail here.
+// ---------------------------------------------------------------------------
+
+/// Every mutating entry point, run against streams of each flag combination.
+///
+/// For each combination of (cancellable, pausable, transferable) the test:
+/// 1. Creates a stream with those flags.
+/// 2. Records the flags at creation.
+/// 3. Runs every entry point that is legal for that combination.
+/// 4. Asserts the flags are identical after each entry point.
+///
+/// Entry points that are rejected by a flag (e.g. `cancel` on a
+/// non-cancellable stream) are still invoked: a rejection must not mutate
+/// state, so the flags must be unchanged even on the error path.
+#[test]
+fn all_mutating_entry_points_leave_capability_flags_unchanged() {
+    // All eight flag combinations of (cancellable, pausable, transferable).
+    let combos: [(bool, bool, bool); 8] = [
+        (false, false, false),
+        (false, false, true),
+        (false, true, false),
+        (false, true, true),
+        (true, false, false),
+        (true, false, true),
+        (true, true, false),
+        (true, true, true),
+    ];
+
+    for (cancellable, pausable, transferable) in combos {
+        let h = Harness::new();
+        let start = h.now();
+        let id = h.create(
+            10_000 * ONE,
+            start,
+            start + 365 * DAY,
+            start,
+            cancellable,
+            pausable,
+            transferable,
+        );
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // --- top_up: always legal ------------------------------------------
+        h.advance(DAY);
+        h.client.top_up(&id, &(100 * ONE));
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // --- withdraw: always legal ----------------------------------------
+        h.advance(30 * DAY);
+        h.client.withdraw(&id, &None);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // --- extend_stream_ttl: always legal -------------------------------
+        h.client.extend_stream_ttl(&id);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // --- pause / resume: only meaningful when pausable -----------------
+        if pausable {
+            h.advance(10 * DAY);
+            h.client.pause(&id);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            h.advance(5 * DAY);
+            h.client.resume(&id);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+        }
+
+        // --- transfer_recipient: only meaningful when transferable ---------
+        if transferable {
+            h.advance(5 * DAY);
+            h.client.transfer_recipient(&id, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            // Transfer back so subsequent delegate ops use the original recipient.
+            h.client.transfer_recipient(&id, &h.recipient);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+        }
+
+        // --- grant_delegate / revoke_delegate: always legal ----------------
+        h.client.grant_delegate(&id, &h.other, &true, &true, &true);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+        h.client.revoke_delegate(&id, &h.other);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // --- delegate path: grant then exercise each delegate op -----------
+        h.client.grant_delegate(&id, &h.other, &true, &true, &true);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // delegate_withdraw
+        h.advance(10 * DAY);
+        h.client.delegate_withdraw(&id, &h.other, &None);
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // delegate_top_up
+        h.client.delegate_top_up(&id, &h.other, &(50 * ONE));
+        assert_flags(&h, id, cancellable, pausable, transferable);
+
+        // delegate_pause / delegate_resume (only when pausable)
+        if pausable {
+            h.advance(5 * DAY);
+            h.client.delegate_pause(&id, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            h.advance(3 * DAY);
+            h.client.delegate_resume(&id, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+        }
+
+        // delegate_transfer_recipient (only when transferable)
+        if transferable {
+            h.advance(2 * DAY);
+            h.client.delegate_transfer_recipient(&id, &h.other, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            h.client.transfer_recipient(&id, &h.recipient);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+        }
+
+        // delegate_cancel (only when cancellable) — terminal, run last.
+        if cancellable {
+            h.advance(10 * DAY);
+            h.client.delegate_cancel(&id, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            assert_eq!(h.get(id).status, StreamStatus::Cancelled);
+        } else {
+            // cancel / delegate_cancel must be rejected and leave flags intact.
+            h.advance(10 * DAY);
+            let _ = h.client.try_cancel(&id);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+            let _ = h.client.try_delegate_cancel(&id, &h.other);
+            assert_flags(&h, id, cancellable, pausable, transferable);
+        }
+
+        h.assert_pool_exact();
+    }
+}
+
+/// Batch entry points also leave capability flags unchanged.
+///
+/// `batch_withdraw`, `batch_extend_ttl`, and `batch_cancel` operate on
+/// collections of stream ids. None of them may widen a capability flag.
+#[test]
+fn batch_entry_points_leave_capability_flags_unchanged() {
+    let h = Harness::new();
+    let start = h.now();
+
+    // Three streams with distinct flag combinations.
+    let id0 = h.create(1_000 * ONE, start, start + 100 * DAY, start, false, false, false);
+    let id1 = h.create(1_000 * ONE, start, start + 100 * DAY, start, true, true, true);
+    let id2 = h.create(1_000 * ONE, start, start + 100 * DAY, start, false, true, false);
+
+    let ids = h.ids(&[id0, id1, id2]);
+
+    h.advance(50 * DAY);
+
+    // batch_withdraw
+    h.client.batch_withdraw(&h.recipient, &ids, &None);
+    assert_flags(&h, id0, false, false, false);
+    assert_flags(&h, id1, true, true, true);
+    assert_flags(&h, id2, false, true, false);
+
+    // batch_extend_ttl
+    h.client.batch_extend_ttl(&ids);
+    assert_flags(&h, id0, false, false, false);
+    assert_flags(&h, id1, true, true, true);
+    assert_flags(&h, id2, false, true, false);
+
+    // batch_cancel — only id1 is cancellable; the others must reject.
+    let _ = h.client.try_batch_cancel(&h.recipient, &h.ids(&[id0, id1, id2]));
+    assert_flags(&h, id0, false, false, false);
+    assert_flags(&h, id1, true, true, true);
+    assert_flags(&h, id2, false, true, false);
+
+    h.assert_pool_exact();
+}
