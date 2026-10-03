@@ -2,6 +2,13 @@
 
 **Status: FROZEN as of 2026-08-12, ahead of stage 5.**
 
+> The wasm hash and interface-spec hash below describe the deployment currently
+> on testnet. Additions since the freeze — the recipient acceptance gate of
+> issue #1817 (`create_stream_pending`, `accept_stream`, `decline_stream`, the
+> `Pending`/`Declined` statuses and the appended `StreamCreated.status` field) —
+> are additive and ship with the next deployment at a new address, per the
+> upgrade posture below.
+
 This document is the interface contract between `Fluxora-Contracts` and every
 consumer — `Fluxora-Backend`, `Fluxora-Frontend`, `fluxora-sdk`, and third-party
 integrators. Anything not described here is not part of the interface.
@@ -267,6 +274,8 @@ Crosses the ABI as its **discriminant**, not its name.
 | `1` | `Paused` | no | accrual clock frozen; withdrawal still permitted |
 | `2` | `Cancelled` | yes | sender clawed back the unvested remainder |
 | `3` | `Depleted` | yes | ran to term and was fully withdrawn |
+| `4` | `Pending` | no | awaiting recipient acceptance; no accrual, no payout |
+| `5` | `Declined` | yes | recipient refused before accept; sender refunded in full |
 
 `Cancelled` is **sticky**: a cancelled stream later drained to zero stays
 `Cancelled`. It never becomes `Depleted`. This distinction is deliberate and
@@ -1747,11 +1756,11 @@ may emit fewer than 16 events.
 Both were open against `Fluxora-Backend` in [MIGRATION.md](MIGRATION.md) §5
 and are settled here as part of the freeze.
 
-### 1. `streams.status` — mirror the contract's four values verbatim
+### 1. `streams.status` — mirror the contract's values verbatim
 
 The backend's current CHECK constraint is
 `('active','paused','completed','cancelled')`. The contract emits
-`Active | Paused | Cancelled | Depleted`.
+`Active | Paused | Cancelled | Depleted | Pending | Declined`.
 
 **Resolution: rename `completed` to `depleted` and use the contract's four names
 as-is.** Do not map `Depleted` onto `completed`.

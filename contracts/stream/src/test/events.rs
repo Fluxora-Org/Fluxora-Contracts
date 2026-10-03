@@ -92,14 +92,15 @@ fn topic_name(h: &Harness, event: &(soroban_sdk::Vec<Val>, Val)) -> Symbol {
 // ---------------------------------------------------------------------------
 // Invariant 1 — No two event types share the same topic[0] symbol.
 //
-// Strategy: emit every one of the 10 event types in a single Env, accumulate
+// Strategy: emit every one of the 12 event types in a single Env, accumulate
 // all events after each operation (soroban's Events::all() only retains the
 // most recent invocation, so we must capture eagerly), then assert the
 // collected topic[0] symbols are distinct.
 //
 // Full inventory covered:
 //   stream_created, paused, resumed, topped_up, recipient_transferred,
-//   withdrawn, cancelled, ttl_extended, delegate_granted, delegate_revoked
+//   withdrawn, cancelled, ttl_extended, delegate_granted, delegate_revoked,
+//   stream_accepted, stream_declined
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -217,7 +218,9 @@ fn test_all_event_topic_names_are_unique() {
             "paused".into(),
             "recipient_transferred".into(),
             "resumed".into(),
+            "stream_accepted".into(),
             "stream_created".into(),
+            "stream_declined".into(),
             "topped_up".into(),
             "ttl_extended".into(),
             "withdrawn".into(),
@@ -500,6 +503,82 @@ fn resumed_event_paused_total_recomputes_the_moved_cliff() {
         h.get(id).cliff_time + paused_total,
         cliff + 600,
         "cliff_time + paused_total is the moved wall-clock cliff"
+    );
+}
+
+/// **Issue #1817: the acceptance gate publishes the rebased schedule and the
+/// full refund.**
+///
+/// An indexer that saw a `stream_created` with `status == Pending` must be able
+/// to follow the stream to its live schedule through `stream_accepted` alone,
+/// and to reconcile the refund from `stream_declined` alone. This pins both
+/// payloads against the values the contract actually writes.
+#[test]
+fn acceptance_gate_events_publish_the_rebased_schedule_and_refund() {
+    let h = Harness::new();
+    let duration = 10 * DAY;
+
+    let id = h.create_pending(100 * ONE, duration);
+    h.advance(DAY);
+    h.client.accept_stream(&id);
+
+    let events = drain_events(&h);
+    let accepted = events
+        .iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "stream_accepted"))
+        .expect("accept_stream must emit a stream_accepted event");
+    let payload: soroban_sdk::Map<Symbol, Val> = accepted.1.try_into_val(&h.env).unwrap();
+    let start: u64 = payload
+        .get(Symbol::new(&h.env, "start_time"))
+        .expect("stream_accepted must publish start_time")
+        .try_into_val(&h.env)
+        .unwrap();
+    let end: u64 = payload
+        .get(Symbol::new(&h.env, "end_time"))
+        .expect("stream_accepted must publish end_time")
+        .try_into_val(&h.env)
+        .unwrap();
+    let cliff: u64 = payload
+        .get(Symbol::new(&h.env, "cliff_time"))
+        .expect("stream_accepted must publish cliff_time")
+        .try_into_val(&h.env)
+        .unwrap();
+    assert_eq!(
+        start,
+        T0 + DAY,
+        "the rebased start is the acceptance instant"
+    );
+    assert_eq!(end - start, duration, "the authored duration is preserved");
+    assert_eq!(cliff, start, "no-cliff schedules keep cliff == start");
+
+    let declined_id = h.create_pending(100 * ONE, duration);
+    h.client.decline_stream(&declined_id);
+
+    let events = drain_events(&h);
+    let declined = events
+        .iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "stream_declined"))
+        .expect("decline_stream must emit a stream_declined event");
+    let payload: soroban_sdk::Map<Symbol, Val> = declined.1.try_into_val(&h.env).unwrap();
+    let refunded: i128 = payload
+        .get(Symbol::new(&h.env, "refunded"))
+        .expect("stream_declined must publish refunded")
+        .try_into_val(&h.env)
+        .unwrap();
+    assert_eq!(refunded, 100 * ONE, "declining refunds the whole deposit");
+
+    // The creation event tells the two paths apart without a follow-up read.
+    let created = h.create_pending(100 * ONE, duration);
+    let _ = created;
+    let events = drain_events(&h);
+    let created_event = events
+        .iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "stream_created"))
+        .expect("create_stream_pending must emit stream_created");
+    let payload: soroban_sdk::Map<Symbol, Val> = created_event.1.try_into_val(&h.env).unwrap();
+    assert!(
+        payload.contains_key(Symbol::new(&h.env, "status")),
+        "stream_created must publish the created status (Active vs Pending)"
     );
 }
 

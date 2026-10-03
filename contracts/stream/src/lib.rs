@@ -385,6 +385,104 @@ fn verify_pool_balance(env: &Env, token: &Address) -> Result<(), Error> {
     Ok(())
 }
 
+/// Shared body of [`FluxoraStream::create_stream`] and
+/// [`FluxoraStream::create_stream_pending`].
+///
+/// The two entry points differ only in the `status` the stream is created in,
+/// so every validation rule, the overflow guard, the id allocation and the
+/// deposit pull live here exactly once. Keeping them in one place is what makes
+/// "the pending path is the default path plus an acceptance gate" true by
+/// construction rather than by review — a validation rule added to one entry
+/// point cannot be forgotten in the other.
+///
+/// The deposit is pulled in **both** cases. A pending stream escrows the funds
+/// immediately, which is what makes [`FluxoraStream::decline_stream`]'s full
+/// refund and [`FluxoraStream::cancel`]'s pending escape hatch possible without
+/// a second token transfer from the sender.
+#[allow(clippy::too_many_arguments)]
+fn create_stream_inner(
+    env: &Env,
+    sender: Address,
+    recipient: Address,
+    token: Address,
+    deposit: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+    status: StreamStatus,
+) -> Result<u64, Error> {
+    sender.require_auth();
+
+    if sender == recipient {
+        return Err(Error::SelfStream);
+    }
+    if deposit <= 0 {
+        return Err(Error::InvalidDeposit);
+    }
+    if end_time <= start_time {
+        return Err(Error::InvalidTimeRange);
+    }
+    if cliff_time < start_time || cliff_time > end_time {
+        return Err(Error::InvalidCliff);
+    }
+
+    let total_duration = end_time - start_time;
+
+    // Reject dust-rate streams. Below one stroop per second the recipient
+    // accrues literally nothing until very late in the schedule, which is a
+    // real footgun for a treasury streaming a small grant over a year.
+    if deposit < total_duration as i128 {
+        return Err(Error::DepositRateTooLow);
+    }
+
+    // Front-load the overflow guard for all future accrual. Because
+    // `elapsed <= duration` always holds, proving `deposit * duration` fits
+    // in an i128 here means the `deposited * elapsed` multiplication inside
+    // `vested` can never overflow for the life of the stream. `top_up`
+    // re-establishes the same guard against its new figures, and so does
+    // `accept_stream`, which can move the schedule but never the duration.
+    deposit
+        .checked_mul(total_duration as i128)
+        .ok_or(Error::Overflow)?;
+
+    let stream_id = storage::next_stream_id(env)?;
+    let stream = Stream {
+        sender: sender.clone(),
+        recipient,
+        token: token.clone(),
+        deposited: deposit,
+        withdrawn: 0,
+        start_time,
+        end_time,
+        cliff_time,
+        cancellable,
+        pausable,
+        transferable,
+        paused_at: None,
+        paused_total: 0,
+        status,
+    };
+
+    // Pull the deposit before writing the stream entry. If the token
+    // transfer fails (missing contract, authorization refused, insufficient
+    // balance) we return a typed error and leave no phantom entry in
+    // storage — the id counter has already advanced, so the id is
+    // consumed, but no stream with that id is observable to any caller.
+    //
+    // The sender's auth on this invocation covers the nested token
+    // transfer; no prior approval is needed.
+    pull_deposit(env, &token, &sender, &deposit)?;
+
+    storage::save_stream(env, stream_id, &stream);
+    storage::extend_instance(env);
+
+    events::stream_created(env, stream_id, &stream);
+    Ok(stream_id)
+}
+
 #[contract]
 pub struct FluxoraStream;
 
@@ -738,13 +836,70 @@ impl FluxoraStream {
             .checked_mul(total_duration as i128)
             .ok_or(Error::Overflow)?;
 
-        let stream_id = storage::next_stream_id(&env)?;
-        let stream = Stream {
-            sender: sender.clone(),
+    /// Create a stream that the recipient must accept before it starts.
+    ///
+    /// Identical to [`create_stream`](Self::create_stream) in every argument,
+    /// every validation rule and the token movement — the deposit is escrowed
+    /// immediately — with one difference: the stream is created `Pending`
+    /// instead of `Active`.
+    ///
+    /// # Why this exists
+    ///
+    /// `create_stream` makes the recipient a party without their involvement.
+    /// They can be named as the counterparty to a token they cannot or will not
+    /// hold, and their only recourse is to never withdraw — which a treasury
+    /// cannot tell apart from "has not withdrawn yet". A pending stream closes
+    /// that gap: the deposit is held, but nothing accrues and nothing is paid
+    /// until the recipient answers.
+    ///
+    /// # The schedule is authored now, applied on acceptance
+    ///
+    /// `start_time`, `end_time` and `cliff_time` are validated exactly as for
+    /// `create_stream`, and the pending stream's accrual clock does not run:
+    /// [`crate::accrual::vested`] short-circuits to zero while the status is
+    /// `Pending`, so `vested_of`, `withdrawable_of` and `refundable_of` all
+    /// report the pre-start picture whatever the wall clock says.
+    ///
+    /// On acceptance the schedule is **rebased** ([`accept_stream`](Self::accept_stream))
+    /// so the authored duration and cliff offset are preserved and the stream
+    /// begins at `max(start_time, acceptance instant)`. A future-dated
+    /// `start_time` is therefore honoured as a scheduled start, while a past or
+    /// present one means "start when accepted". Rebasing rather than merely
+    /// gating means the recipient receives the whole agreed duration from when
+    /// they said yes, and is never credited for time that elapsed before they
+    /// were a party.
+    ///
+    /// # Sender escape hatch
+    ///
+    /// A recipient who never responds cannot strand the sender's funds:
+    /// [`cancel`](Self::cancel) refunds a pending stream in full regardless of
+    /// its `cancellable` flag — that flag describes a live, accepted stream,
+    /// and a pending stream is not one. [`decline_stream`](Self::decline_stream)
+    /// is the same full refund, but only the recipient may call it.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`create_stream`](Self::create_stream).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_stream_pending(
+        env: Env,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        deposit: i128,
+        start_time: u64,
+        end_time: u64,
+        cliff_time: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> Result<u64, Error> {
+        create_stream_inner(
+            &env,
+            sender,
             recipient,
-            token: token.clone(),
-            deposited: deposit,
-            withdrawn: 0,
+            token,
+            deposit,
             start_time,
             end_time,
             cliff_time,
@@ -759,21 +914,149 @@ impl FluxoraStream {
             reference,
         };
 
-        // Pull the deposit before writing the stream entry. If the token
-        // transfer fails (missing contract, authorization refused, insufficient
-        // balance) we return a typed error and leave no phantom entry in
-        // storage — the id counter has already advanced, so the id is
-        // consumed, but no stream with that id is observable to any caller.
-        //
-        // The sender's auth on this invocation covers the nested token
-        // transfer; no prior approval is needed.
-        pull_deposit(&env, &token, &sender, &deposit)?;
+    /// Accept a pending stream: start its clock and let it accrue.
+    ///
+    /// Only the stream's `recipient` may accept, and only while the stream is
+    /// `Pending` ([`Error::StreamNotPending`] otherwise). A stream can be
+    /// accepted at most once, because acceptance moves it out of `Pending`.
+    ///
+    /// # The rebase, exactly
+    ///
+    /// ```text
+    /// duration     = end_time - start_time            (authored; unchanged)
+    /// cliff_offset = cliff_time - start_time          (authored; unchanged)
+    /// start_time'  = max(start_time, now)
+    /// end_time'    = start_time' + duration
+    /// cliff_time'  = start_time' + cliff_offset
+    /// status       = Active
+    /// ```
+    ///
+    /// The duration and the cliff offset are preserved exactly, so the stream
+    /// the recipient accepts is the schedule the sender authored — measured
+    /// from the acceptance instant rather than from creation. Because the clock
+    /// never ran while pending, `vested(now)` is zero both before and after
+    /// this call: acceptance cannot hand the recipient a retroactive windfall,
+    /// nor take one away (invariant I3).
+    ///
+    /// Acceptance is refused on a stream that has already been cancelled or
+    /// declined, since neither is `Pending`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamNotPending`] — the stream is not awaiting acceptance.
+    /// * [`Error::Overflow`] — the rebased `end_time` or `cliff_time` does not
+    ///   fit in a `u64` (only reachable with a `start_time` near `u64::MAX`).
+    pub fn accept_stream(env: Env, stream_id: u64) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        if !stream.status.is_pending() {
+            return Err(Error::StreamNotPending);
+        }
+
+        let now = env.ledger().timestamp();
+
+        // Preserve the authored duration and cliff offset; move the whole
+        // schedule so it begins no earlier than the acceptance instant.
+        let total_duration = stream
+            .end_time
+            .checked_sub(stream.start_time)
+            .ok_or(Error::Overflow)?;
+        let cliff_offset = stream
+            .cliff_time
+            .checked_sub(stream.start_time)
+            .ok_or(Error::Overflow)?;
+
+        let new_start = stream.start_time.max(now);
+        let new_end = new_start
+            .checked_add(total_duration)
+            .ok_or(Error::Overflow)?;
+        let new_cliff = new_start.checked_add(cliff_offset).ok_or(Error::Overflow)?;
+
+        // Re-establish the creation-time accrual overflow guard against the
+        // rebased figures, exactly as `top_up` does: `deposited * duration`
+        // must fit in an i128 for the life of the stream.
+        stream
+            .deposited
+            .checked_mul(total_duration as i128)
+            .ok_or(Error::Overflow)?;
+
+        let old_vested = accrual::vested(&stream, now)?;
+
+        stream.start_time = new_start;
+        stream.end_time = new_end;
+        stream.cliff_time = new_cliff;
+        stream.status = StreamStatus::Active;
+
+        // I3: acceptance must never move `vested` backwards. While pending it
+        // is zero, and the rebased schedule starts no earlier than `now`, so it
+        // is still zero here — this guard makes that structural rather than a
+        // property of the current rebase formula.
+        if accrual::vested(&stream, now)? < old_vested {
+            return Err(Error::VestedDecreased);
+        }
 
         storage::save_stream(&env, stream_id, &stream);
-        storage::extend_instance(&env);
+        events::stream_accepted(&env, stream_id, &stream);
+        Ok(())
+    }
 
-        events::stream_created(&env, stream_id, &stream);
-        Ok(stream_id)
+    /// Decline a pending stream: refund the sender in full, accrue nothing.
+    ///
+    /// Only the stream's `recipient` may decline, and only while the stream is
+    /// `Pending` ([`Error::StreamNotPending`] otherwise). The refund is the
+    /// entire `deposited` amount — nothing ever vested, so there is nothing for
+    /// the recipient to keep and nothing for the sender to lose. The stream
+    /// becomes `Declined`, a terminal state deliberately distinct from
+    /// `Cancelled` so an indexer can tell "the recipient refused" apart from
+    /// "the sender clawed back".
+    ///
+    /// The schedule is collapsed onto the decline instant (`deposited = 0`,
+    /// `end_time = max(start_time, now)`) exactly as [`cancel`](Self::cancel)
+    /// collapses a live one, so accounting and TTL behave identically to a
+    /// cancelled stream from that point on.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    /// * [`Error::StreamNotPending`] — the stream is not awaiting acceptance.
+    pub fn decline_stream(env: Env, stream_id: u64) -> Result<(), Error> {
+        let mut stream = storage::load_stream(&env, stream_id)?;
+        stream.recipient.require_auth();
+
+        if !stream.status.is_pending() {
+            return Err(Error::StreamNotPending);
+        }
+
+        let now = env.ledger().timestamp();
+        // Nothing has vested on a pending stream, so the whole deposit goes
+        // back. Read through the accrual module rather than assuming zero, so
+        // the refund and the vesting gate cannot drift apart.
+        let refund = accrual::refundable(&stream, now)?;
+
+        let settle_at = accrual::stream_time(&stream, now).max(stream.start_time);
+        stream.deposited = 0;
+        stream.end_time = settle_at;
+        stream.paused_at = None;
+        stream.status = StreamStatus::Declined;
+
+        let token = stream.token.clone();
+        let sender = stream.sender.clone();
+        storage::save_stream(&env, stream_id, &stream);
+
+        if refund > 0 {
+            token_transfer(
+                &env,
+                &token,
+                &env.current_contract_address(),
+                MuxedAddress::from(sender),
+                &refund,
+            )?;
+        }
+
+        events::stream_declined(&env, stream_id, &stream, refund);
+        Ok(())
     }
 
     /// Create several streams atomically for one sender.
@@ -1037,6 +1320,9 @@ impl FluxoraStream {
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
         }
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
+        }
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -1165,6 +1451,13 @@ impl FluxoraStream {
         Self::require_not_halted(&env)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
         stream.recipient.require_auth();
+
+        // Not accepted yet: nothing has been earned, so this is a precondition
+        // failure about the stream's state, not "wait for accrual". A typed
+        // error lets a client say "accept it first" instead of guessing.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
+        }
 
         let now = env.ledger().timestamp();
         let available = accrual::withdrawable(&stream, now)?;
@@ -1641,6 +1934,12 @@ impl FluxoraStream {
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
         }
+        // A pending stream's clock has not started, so there is nothing to
+        // freeze. Allowing it would also overwrite the `Pending` marker with
+        // `Paused`, silently dropping the acceptance gate.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
+        }
         if stream.status == StreamStatus::Paused {
             return Err(Error::StreamAlreadyPaused);
         }
@@ -1671,6 +1970,11 @@ impl FluxoraStream {
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
+        }
+        // Resuming a pending stream would clear the acceptance gate without the
+        // recipient's consent. Only `accept_stream` starts a pending stream.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
         }
         let paused_at = match stream.paused_at {
             Some(t) => t,
@@ -1746,6 +2050,12 @@ impl FluxoraStream {
 
         if !stream.transferable {
             return Err(Error::NotTransferable);
+        }
+        // A pending stream's recipient is pinned until they answer: reassigning
+        // it would let the sender pick a different counterparty after the fact.
+        // (`accept_stream` and `decline_stream` are the only ways out.)
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
         }
         // A stream with no claim left is not reassignable. This covers both
         // `Depleted` streams and cancelled streams whose tail has been fully
@@ -1928,6 +2238,11 @@ impl FluxoraStream {
         Self::check_delegate(&env, stream_id, &delegate, op::WITHDRAW)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
+        // Mirrors `withdraw`: a pending stream has nothing to pay out.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
+        }
+
         let now = env.ledger().timestamp();
         let available = accrual::withdrawable(&stream, now)?;
         if available == 0 {
@@ -1966,7 +2281,10 @@ impl FluxoraStream {
         Self::check_delegate(&env, stream_id, &delegate, op::CANCEL)?;
         let mut stream = storage::load_stream(&env, stream_id)?;
 
-        if !stream.cancellable {
+        // Mirrors `cancel`: a pending stream is refundable in full even when
+        // `cancellable == false`, because the promise that flag encodes only
+        // applies once a stream is live. See `cancel` for the reasoning.
+        if !stream.cancellable && !stream.status.is_pending() {
             return Err(Error::NotCancellable);
         }
         if stream.status.is_terminal() {
@@ -2019,6 +2337,10 @@ impl FluxoraStream {
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
         }
+        // Mirrors `pause`: a pending stream has no running clock to freeze.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
+        }
         if stream.status == StreamStatus::Paused {
             return Err(Error::StreamAlreadyPaused);
         }
@@ -2041,6 +2363,10 @@ impl FluxoraStream {
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
+        }
+        // Mirrors `resume`: acceptance is the recipient's call alone.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
         }
         let paused_at = match stream.paused_at {
             Some(t) => t,
@@ -2078,6 +2404,9 @@ impl FluxoraStream {
 
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
+        }
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
         }
         if amount <= 0 {
             return Err(Error::InvalidAmount);
@@ -2173,6 +2502,10 @@ impl FluxoraStream {
 
         if !stream.transferable {
             return Err(Error::NotTransferable);
+        }
+        // Mirrors `transfer_recipient`: a pending stream's recipient is fixed.
+        if stream.status.is_pending() {
+            return Err(Error::StreamPending);
         }
         // Same settled-claim rule as `transfer_recipient`: a stream with no
         // unwithdrawn claim is not reassignable.

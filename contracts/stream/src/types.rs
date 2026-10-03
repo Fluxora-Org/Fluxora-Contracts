@@ -69,12 +69,20 @@ pub struct BatchCancelOutcome {
 
 /// Lifecycle state of a stream.
 ///
-/// `Cancelled` and `Depleted` are both terminal and both imply
-/// withdrawable == 0` will eventually hold, but they are kept distinct so the
-/// indexer can tell "dan to completion" apart from "sender clawed back the
-/// unvested remainder". `Cancelled` is sticky: a cancelled stream that is
+/// `Cancelled`, `Depleted` and `Declined` are all terminal and all imply
+/// `withdrawable == 0` will eventually hold, but they are kept distinct so the
+/// indexer can tell "ran to completion" apart from "sender clawed back the
+/// unvested remainder" apart from "the recipient refused the stream before it
+/// ever started". `Cancelled` is sticky: a cancelled stream that is
 /// subsequently drained to zero stays `Cancelled` rather than becoming
 /// `Depleted`.
+///
+/// `Pending` is the opt-in acceptance gate created by
+/// [`crate::FluxoraStream::create_stream_pending`]. A pending stream holds the
+/// sender's deposit in escrow but accrues nothing and pays nothing until the
+/// recipient accepts it ([`crate::FluxoraStream::accept_stream`]) or declines
+/// it ([`crate::FluxoraStream::decline_stream`]). `create_stream` never
+/// produces it, so the default creation path is unchanged.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamStatus {
@@ -82,12 +90,26 @@ pub enum StreamStatus {
     Paused = 1,
     Cancelled = 2,
     Depleted = 3,
+    /// Awaiting recipient acceptance. No accrual, no payout, full refund
+    /// available to the sender on cancel. Not terminal.
+    Pending = 4,
+    /// The recipient declined a `Pending` stream; the entire deposit has been
+    /// returned to the sender. Terminal.
+    Declined = 5,
 }
 
 impl StreamStatus {
     /// Terminal states accept no further lifecycle transitions.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, StreamStatus::Cancelled | StreamStatus::Depleted)
+        matches!(
+            self,
+            StreamStatus::Cancelled | StreamStatus::Depleted | StreamStatus::Declined
+        )
+    }
+
+    /// Whether this stream is awaiting recipient acceptance.
+    pub fn is_pending(&self) -> bool {
+        matches!(self, StreamStatus::Pending)
     }
 }
 

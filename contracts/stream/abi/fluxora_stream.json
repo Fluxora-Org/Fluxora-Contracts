@@ -118,6 +118,31 @@
       "outputs": "Result<u64, Error>"
     },
     {
+      "name": "create_stream_pending",
+      "auth": "sender",
+      "inputs": [
+        {"name": "sender", "type": "Address"},
+        {"name": "recipient", "type": "Address"},
+        {"name": "token", "type": "Address"},
+        {"name": "deposit", "type": "i128"},
+        {"name": "start_time", "type": "u64"},
+        {"name": "end_time", "type": "u64"},
+        {"name": "cliff_time", "type": "u64"},
+        {"name": "cancellable", "type": "bool"},
+        {"name": "pausable", "type": "bool"},
+        {"name": "transferable", "type": "bool"}
+      ],
+      "outputs": "Result<u64, Error>"
+    },
+    {
+      "name": "decline_stream",
+      "auth": "recipient",
+      "inputs": [
+        {"name": "stream_id", "type": "u64"}
+      ],
+      "outputs": "Result<(), Error>"
+    },
+    {
       "name": "delegate_cancel",
       "auth": "delegate",
       "inputs": [

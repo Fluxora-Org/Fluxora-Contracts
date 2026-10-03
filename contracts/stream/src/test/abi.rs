@@ -342,6 +342,8 @@ fn current_inventory() -> Inventory {
 
     let mut events = vec![
         event_from_spec(parse_spec(&StreamCreated::spec_xdr())),
+        event_from_spec(parse_spec(&StreamAccepted::spec_xdr())),
+        event_from_spec(parse_spec(&StreamDeclined::spec_xdr())),
         event_from_spec(parse_spec(&Withdrawn::spec_xdr())),
         event_from_spec(parse_spec(&Cancelled::spec_xdr())),
         event_from_spec(parse_spec(&Paused::spec_xdr())),

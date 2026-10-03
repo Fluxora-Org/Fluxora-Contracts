@@ -6,7 +6,12 @@
 
 ## What Are Terminal Operations?
 
-Terminal states (`Cancelled` and `Depleted`) represent streams that have reached their end state. Once terminal, a stream rejects all mutating lifecycle operations.
+Terminal states (`Cancelled`, `Depleted` and `Declined`) represent streams that have reached their end state. Once terminal, a stream rejects all mutating lifecycle operations.
+
+`Pending` is **not** terminal: it is the opt-in acceptance gate added by issue
+#1817, where a stream waits for the recipient to accept or decline before its
+clock starts. It rejects every accrual-dependent operation, but it can still be
+cancelled by the sender (full refund) or answered by the recipient.
 
 ## Terminal States
 
@@ -16,25 +21,32 @@ pub enum StreamStatus {
     Paused,      // ← Temporarily frozen
     Cancelled,   // ← Terminal: sender clawed back unvested
     Depleted,    // ← Terminal: ran to completion and fully paid
+    Pending,     // ← Not terminal: awaiting recipient acceptance (issue #1817)
+    Declined,    // ← Terminal: recipient refused; sender refunded in full
 }
 
 impl StreamStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, StreamStatus::Cancelled | StreamStatus::Depleted)
+        matches!(
+            self,
+            StreamStatus::Cancelled | StreamStatus::Depleted | StreamStatus::Declined
+        )
     }
 }
 ```
 
 ## Rejection Matrix
 
-| Operation | Active | Paused | Cancelled | Depleted |
-|-----------|--------|--------|-----------|----------|
-| **pause** | ✓ | ✗¹ | ✗² | ✗² |
-| **resume** | ✗³ | ✓ | ✗² | ✗² |
-| **top_up** | ✓ | ✓ | ✗² | ✗² |
-| **withdraw** | ✓ | ✓ | ✓⁴ | ✗² |
-| **cancel** | ✓ | ✓ | ✗² | ✗² |
-| **transfer_recipient** | ✓ | ✓ | ✗² | ✓⁵ |
+| Operation | Active | Paused | Pending | Cancelled | Depleted | Declined |
+|-----------|--------|--------|---------|-----------|----------|----------|
+| **pause** | ✓ | ✗¹ | ✗⁶ | ✗² | ✗² | ✗² |
+| **resume** | ✗³ | ✓ | ✗⁶ | ✗² | ✗² | ✗² |
+| **top_up** | ✓ | ✓ | ✗⁶ | ✗² | ✗² | ✗² |
+| **withdraw** | ✓ | ✓ | ✗⁶ | ✓⁴ | ✗² | ✗² |
+| **cancel** | ✓ | ✓ | ✓⁷ | ✗² | ✗² | ✗² |
+| **transfer_recipient** | ✓ | ✓ | ✗⁶ | ✗² | ✓⁵ | ✗² |
+| **accept_stream** | ✗⁸ | ✗⁸ | ✓ | ✗⁸ | ✗⁸ | ✗⁸ |
+| **decline_stream** | ✗⁸ | ✗⁸ | ✓ | ✗⁸ | ✗⁸ | ✗⁸ |
 
 **Legend:**
 - ✓ = Allowed
@@ -46,6 +58,9 @@ impl StreamStatus {
 3. `StreamNotPaused` - cannot resume when not paused
 4. Works if `withdrawable > 0`, else `StreamTerminated`
 5. Works if `withdrawn < deposited`, else `StreamTerminated`
+6. `StreamPending` (35) - the stream awaits recipient acceptance
+7. Allowed regardless of the `cancellable` flag, and always refunds the entire deposit: nothing has vested, so a recipient who never answers must not be able to lock the sender's funds
+8. `StreamNotPending` (34) - the stream is not awaiting acceptance
 
 ## Error: StreamTerminated
 
@@ -91,6 +106,22 @@ Paused → withdraw(all) → Depleted (terminal)
 - `withdrawn == deposited`
 - Clean completion, no clawback
 - Status honors the original schedule completion
+
+### Path to Declined
+
+```
+Pending → decline_stream() → Declined (terminal)
+Pending → cancel()         → Cancelled (terminal)
+```
+
+**Characteristics:**
+- Only reachable from `Pending`: the recipient refused before accepting, or the
+  sender reclaimed a deposit the recipient never answered on
+- The **entire** deposit is refunded — nothing had vested
+- `deposited == 0` and `withdrawn == 0`; the schedule is collapsed onto the
+  decline instant, exactly as a cancel collapses a live one
+- `Declined` is kept distinct from `Cancelled` so an indexer can tell "the
+  recipient refused" from "the sender clawed back"
 
 ## Common Scenarios
 

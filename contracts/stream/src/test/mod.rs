@@ -48,6 +48,8 @@ mod settled_dust;
 // Stage 2
 mod auth;
 mod cancel;
+// Issue #1817: recipient acceptance gate (create_stream_pending / accept / decline).
+mod pending;
 // Issue #1726: capability flags are set at creation and immutable.
 mod capabilities;
 // Issue #1584: the cancellation event's accounting contract.

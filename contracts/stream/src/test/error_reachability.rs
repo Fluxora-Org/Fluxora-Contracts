@@ -789,6 +789,28 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
                  Covered by test::factory_policy_enforcement::rate_above_maximum_is_rejected.",
             ),
         ),
+
+        // --- Acceptance gate (issue #1817) ---------------------------------
+        Error::StreamNotPending => (
+            "StreamNotPending",
+            34,
+            Account::Reach(|h| {
+                // A plain `create_stream` produces an Active stream, which has
+                // nothing to accept.
+                let id = h.create_simple(1_000 * ONE, 100 * DAY);
+                h.client.try_accept_stream(&id).unwrap_err().unwrap()
+            }),
+        ),
+        Error::StreamPending => (
+            "StreamPending",
+            35,
+            Account::Reach(|h| {
+                // A pending stream has not started; `withdraw` refuses it with a
+                // dedicated error rather than `NothingToWithdraw`.
+                let id = h.create_pending(1_000 * ONE, 100 * DAY);
+                h.client.try_withdraw(&id, &None).unwrap_err().unwrap()
+            }),
+        ),
     }
 }
 

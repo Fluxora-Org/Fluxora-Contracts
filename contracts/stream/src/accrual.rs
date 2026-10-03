@@ -179,6 +179,10 @@ pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
 /// `floor(deposited * elapsed / duration)` arithmetic byte for byte, so a
 /// stream created before curves existed vests exactly as it always did.
 pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
+    if stream.status.is_pending() {
+        return Ok(0);
+    }
+
     if !cliff_reached(stream, now) {
         return Ok(0);
     }

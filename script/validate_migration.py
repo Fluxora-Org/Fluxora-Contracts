@@ -21,7 +21,7 @@ Checks performed (each maps to a section of MIGRATION.md):
   §4  – Signature changes: ``create_stream`` must carry a ``token`` parameter
         and the three capability flags; ``withdraw`` must accept
         ``Option<i128>`` as its second argument.
-  §3  – Entrypoint count: the ``16`` core count claimed in the doc must match
+  §3  – Entrypoint count: the ``19`` core count claimed in the doc must match
         the number of non-delegation entrypoints in the ABI.
 
 Exit codes:  0 = all checks passed, 1 = one or more checks failed.

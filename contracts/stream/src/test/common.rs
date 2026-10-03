@@ -287,6 +287,52 @@ impl<'a> Harness<'a> {
         )
     }
 
+    /// A pending stream over `duration`, no cliff, all capabilities on.
+    ///
+    /// Uses `create_stream_pending`, so the stream starts in `Pending` and
+    /// accrues nothing until `accept_stream` is called.
+    pub fn create_pending(&self, deposit: i128, duration: u64) -> u64 {
+        let start = self.now();
+        self.client.create_stream_pending(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &(start + duration),
+            &start,
+            &true,
+            &true,
+            &true,
+        )
+    }
+
+    /// Full control over every parameter of a pending stream.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_pending_full(
+        &self,
+        deposit: i128,
+        start: u64,
+        end: u64,
+        cliff: u64,
+        cancellable: bool,
+        pausable: bool,
+        transferable: bool,
+    ) -> u64 {
+        self.client.create_stream_pending(
+            &self.sender,
+            &self.recipient,
+            &self.token,
+            &deposit,
+            &start,
+            &end,
+            &cliff,
+            &cancellable,
+            &pausable,
+            &transferable,
+        )
+    }
+
     /// Full control over every creation parameter.
     #[allow(clippy::too_many_arguments)]
     pub fn create(
