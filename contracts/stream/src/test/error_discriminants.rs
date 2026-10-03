@@ -197,7 +197,6 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
-        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
         ("ContractHalted", Error::ContractHalted as u32),
         (
             "HaltOperatorAlreadySet",
@@ -206,6 +205,12 @@ fn discriminant_fixture_matches_source() {
         ("HaltOperatorNotSet", Error::HaltOperatorNotSet as u32),
         ("ContractAlreadyHalted", Error::ContractAlreadyHalted as u32),
         ("ContractNotHalted", Error::ContractNotHalted as u32),
+        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
+        (
+            "InvalidReferenceLength",
+            Error::InvalidReferenceLength as u32,
+        ),
+        ("TooManyDelegates", Error::TooManyDelegates as u32),
     ];
 
     assert_eq!(

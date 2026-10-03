@@ -59,7 +59,6 @@ pub enum Error {
     SelfStream = 6,
     /// Reference string exceeds maximum allowed length.
     InvalidReferenceLength = 40,
-
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
     Unauthorized = 7,
@@ -237,49 +236,4 @@ pub enum Error {
     /// third party freeze every withdrawal by dusting the contract with a
     /// single unit. See `docs/ABI.md` "Token assumptions" and
     /// `test::rebase_drift`.
-    PoolBalanceDrift = 39,
-    // --- Contract-level emergency halt (#1818) ---
-    /// A state-changing entry point was called while the contract-level halt
-    /// is engaged.
-    ///
-    /// Only mutations are refused: every read method (`get_stream`,
-    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
-    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
-    /// integrators can still observe the chain during an incident.
-    ContractHalted = 34,
-    /// `set_halt_operator` was called after an operator was already installed.
-    ///
-    /// The setter is deliberately one-shot: there is no rotation entry point,
-    /// so a compromised operator cannot be replaced — it can only be halted by
-    /// deploying a new contract.
-    HaltOperatorAlreadySet = 35,
-    /// `halt` or `resume_contract` was called on a contract that has never had
-    /// a halt operator installed.
-    ///
-    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
-    /// has no operator and no way to engage it.
-    HaltOperatorNotSet = 36,
-    /// `halt` was called while the contract was already halted.
-    ContractAlreadyHalted = 37,
-    /// `resume_contract` was called while the contract was not halted.
-    ///
-    /// There is no timeout on the halt, so this is the only way a resume can
-    /// be a no-op.
-    ContractNotHalted = 38,
-
-    // --- Factory policy ---
-    /// `create_stream_via_factory` was called while the factory's creation
-    /// pause is engaged. The factory admin must unpause before new
-    /// factory-routed streams are accepted.
-    FactoryPaused = 41,
-    /// The deposit exceeds the factory's configured `max_deposit` cap.
-    DepositExceedsCap = 42,
-    /// The stream duration is shorter than the factory's `min_duration` floor.
-    DurationBelowMinimum = 43,
-    /// The token is not on the factory's allowlist.
-    TokenNotAllowlisted = 44,
-    /// The per-second rate is below the factory's `min_rate_per_second` bound.
-    RateBelowMin = 45,
-    /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
-    RateAboveMax = 46,
-}
+    PoolBalanceDrift
