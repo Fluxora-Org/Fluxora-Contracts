@@ -28,6 +28,9 @@ mod error_reachability;
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
 mod halt;
+// Issue #2049 — `halt` called twice in a row: repeat submission is refused
+// with a typed error, moves no tokens, and emits no second event.
+mod halt_repeat;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;
