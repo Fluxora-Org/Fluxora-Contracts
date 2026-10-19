@@ -338,10 +338,10 @@ fn a_delegated_withdrawal_matches_the_direct_withdrawal() {
     assert_eq!(
         delegated
             .client
-            .delegate_withdraw(&delegated_id, &agent, &Some(1 * ONE)),
-        1 * ONE,
+            .delegate_withdraw(&delegated_id, &agent, &Some(ONE)),
+        ONE,
     );
-    assert_eq!(direct.client.withdraw(&direct_id, &Some(1 * ONE)), 1 * ONE,);
+    assert_eq!(direct.client.withdraw(&direct_id, &Some(ONE)), ONE,);
     assert_eq!(direct.get(direct_id), delegated.get(delegated_id));
     direct.assert_pool_exact();
     delegated.assert_pool_exact();

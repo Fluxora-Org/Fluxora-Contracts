@@ -108,6 +108,7 @@ fn withdraw_delegate_pays_new_recipient_after_transfer() {
         "transfer_recipient must emit exactly one stream event"
     );
     let expected_transfer_event = RecipientTransferred {
+        sender: h.sender.clone(),
         stream_id: id,
         old_recipient: h.recipient.clone(),
         new_recipient: new_recipient.clone(),
@@ -182,6 +183,9 @@ fn withdraw_delegate_pays_new_recipient_after_transfer() {
 
     // Event matches storage exactly: recipient topic is the *new* recipient.
     let expected_withdrawn_event = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: stream_final.paused_at,
+        paused_total: stream_final.paused_total,
         stream_id: id,
         recipient: new_recipient.clone(),
         amount: expected_withdrawable,

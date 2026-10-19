@@ -1036,16 +1036,7 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     // state) and compare byte-for-byte, matching the pattern in
     // withdraw_events.rs / cancel_events.rs.
     {
-        let s_after = h.get(id);
-        let expected_event = Resumed {
-            stream_id: id,
-            sender: h.sender.clone(),
-            // paused_duration = wall-clock delta from pause_instant to now
-            paused_duration: 70 * DAY,
-            // paused_total is the post-resume cumulative value stored in stream
-            paused_total: s_after.paused_total,
-        };
-
+        // The SDK retains events for the last invocation; capture before get_stream.
         let published: std::vec::Vec<_> = h
             .env
             .events()
@@ -1053,6 +1044,16 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
             .filter_by_contract(&h.contract_id)
             .events()
             .to_vec();
+        let s_after = h.get(id);
+        let expected_event = Resumed {
+            recipient: h.recipient.clone(),
+            stream_id: id,
+            sender: h.sender.clone(),
+            // paused_duration = wall-clock delta from pause_instant to now
+            paused_duration: 70 * DAY,
+            // paused_total is the post-resume cumulative value stored in stream
+            paused_total: s_after.paused_total,
+        };
 
         assert_eq!(
             published,

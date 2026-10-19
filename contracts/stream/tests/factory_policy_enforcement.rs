@@ -15,11 +15,7 @@ extern crate std;
 
 use fluxora_factory::{FluxoraFactory, FluxoraFactoryClient};
 use fluxora_stream::{Error, FluxoraStream, FluxoraStreamClient};
-use soroban_sdk::{
-    testutils::Address as _,
-    token::{Client as TokenClient, StellarAssetClient},
-    Address, Env,
-};
+use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env};
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -72,11 +68,11 @@ impl Fixture {
         }
     }
 
-    fn stream_client(&self) -> FluxoraStreamClient {
+    fn stream_client(&self) -> FluxoraStreamClient<'_> {
         FluxoraStreamClient::new(&self.env, &self.stream_id)
     }
 
-    fn factory_client(&self) -> FluxoraFactoryClient {
+    fn factory_client(&self) -> FluxoraFactoryClient<'_> {
         FluxoraFactoryClient::new(&self.env, &self.factory_id)
     }
 
@@ -260,4 +256,42 @@ fn valid_stream_passes_all_policy_axes() {
         result.is_ok(),
         "valid stream must be created, got {result:?}"
     );
+}
+
+#[test]
+fn factory_creation_requires_sender_authorization_at_the_root() {
+    let f = Fixture::new();
+    f.env.mock_auths(&[]);
+    let start = f.env.ledger().timestamp();
+    let result = f.stream_client().try_create_stream_via_factory(
+        &f.factory_id,
+        &f.sender,
+        &f.recipient,
+        &f.token,
+        &5_000,
+        &start,
+        &(start + 200),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    assert!(
+        matches!(result, Err(Err(_))),
+        "missing root authorization must fail at the host boundary"
+    );
+    assert_eq!(f.stream_client().stream_count(), 0);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&f.env, &f.token).balance(&f.stream_id),
+        0
+    );
+}
+
+#[test]
+fn contract_halt_also_blocks_factory_creation() {
+    let f = Fixture::new();
+    f.stream_client().set_halt_operator(&f.sender);
+    f.stream_client().halt();
+    assert_eq!(f.create(5_000, 200, &f.token), Err(Error::ContractHalted));
+    assert_eq!(f.stream_client().stream_count(), 0);
 }

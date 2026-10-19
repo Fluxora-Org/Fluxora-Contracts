@@ -104,6 +104,9 @@ fn delegate_withdraw_in_the_expiry_ledger_pays_and_conserves_funds() {
     let published = published_by_stream(&h);
     let after = h.get(id);
     let expected_event = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: after.paused_at,
+        paused_total: after.paused_total,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: paid,

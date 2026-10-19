@@ -59,7 +59,7 @@
 use std::format;
 
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::xdr::{FromXdr, ToXdr};
 use soroban_sdk::Env;
 
 use crate::types::{CliffMode, DataKey, ReleaseCurve, Stream, StreamRecord, StreamStatus};
@@ -411,6 +411,8 @@ fn every_data_key_variant_has_a_known_encoding() {
         // HaltOperator / HaltedAt (#1818)
         "0000001000000001000000010000000f0000000c48616c744f70657261746f72",
         "0000001000000001000000010000000f0000000848616c7465644174",
+        // StreamMetadata(0): additive v2 metadata, separate from the v1 record.
+        "0000001000000001000000020000000f0000000e53747265616d4d657461646174610000000000050000000000000000",
     ];
 
     let all_variants_encoded = &[
@@ -423,6 +425,7 @@ fn every_data_key_variant_has_a_known_encoding() {
         key_hex(&env, DataKey::StreamCurve(u64::MAX)),
         key_hex(&env, DataKey::HaltOperator),
         key_hex(&env, DataKey::HaltedAt),
+        key_hex(&env, DataKey::StreamMetadata(0)),
     ];
     for enc in all_variants_encoded {
         assert!(
@@ -501,6 +504,7 @@ fn pooled_balance_key_is_per_token_and_collision_free() {
 /// byte-identical.
 fn deterministic_stream(env: &Env) -> Stream {
     Stream {
+        reference: None,
         sender: soroban_sdk::Address::generate(env),
         recipient: soroban_sdk::Address::generate(env),
         token: soroban_sdk::Address::generate(env),
@@ -862,8 +866,12 @@ fn v1_layout_is_no_longer_decodable_and_that_is_deliberate() {
         .collect();
     let bytes = soroban_sdk::Bytes::from_slice(&env, &raw_bytes);
 
-    let decoded =
+    let record =
         StreamRecord::from_xdr(&env, &bytes).expect("current reader must decode the old fixture");
+    assert_eq!(
+        record.into_stream(ReleaseCurve::Linear).curve,
+        ReleaseCurve::Linear
+    );
     // Note the failure mode: this is not a clean `Err`. Decoding a `Stream` that
     // is 14 fields long against a 15-field reader fails inside the host while
     // unpacking the map, and the SDK surfaces that as a panic. Either way the
@@ -898,6 +906,8 @@ fn v2_layout_round_trips() {
 
     let env = Env::default();
     let stream = Stream {
+        reference: None,
+        curve: crate::ReleaseCurve::Linear,
         sender: soroban_sdk::Address::generate(&env),
         recipient: soroban_sdk::Address::generate(&env),
         token: soroban_sdk::Address::generate(&env),
@@ -924,12 +934,8 @@ fn v2_layout_round_trips() {
     assert_eq!(decoded.cliff_time, 1_702_592_000);
     assert_eq!(decoded.status, StreamStatus::Active);
 
-    // No side-car in a v1 entry, so the stream is linear and vests exactly as
-    // it always did.
-    let stream = decoded.into_stream(ReleaseCurve::Linear);
-    assert_eq!(stream.curve, ReleaseCurve::Linear);
-    assert_eq!(stream.deposited, 1_000_000_000_000);
-    assert_eq!(stream.end_time, 1_731_536_000);
+    assert_eq!(decoded.curve, ReleaseCurve::Linear);
+    assert_eq!(decoded.reference, None);
 }
 
 /// **The negative half of the fixture guard.** `Stream` grew a `curve` field in

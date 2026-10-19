@@ -25,7 +25,7 @@
 //! `u64` bound.
 
 use super::common::*;
-use crate::{DataKey, Error, Stream, StreamStatus};
+use crate::{types::StreamRecord, DataKey, Error, StreamStatus};
 use soroban_sdk::{testutils::Events, Map, Symbol, TryFromVal, TryIntoVal, Val};
 
 /// The `Map` payload of the most recent event emitted by the stream contract.
@@ -364,7 +364,7 @@ fn the_accumulator_is_checked_not_wrapping() {
     // Seed the accumulator close enough to the bound that this pause overflows.
     h.env.as_contract(&h.contract_id, || {
         let key = DataKey::Stream(id);
-        let mut s: Stream = h.env.storage().persistent().get(&key).unwrap();
+        let mut s: StreamRecord = h.env.storage().persistent().get(&key).unwrap();
         s.paused_total = u64::MAX - 5;
         h.env.storage().persistent().set(&key, &s);
     });

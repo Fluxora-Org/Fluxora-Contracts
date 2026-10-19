@@ -11,7 +11,7 @@ use soroban_sdk::String;
 
 use crate::error::Error;
 use crate::test::common::{Harness, DAY, ONE};
-use crate::types::{StreamStatus, MAX_REFERENCE_LENGTH};
+use crate::types::MAX_REFERENCE_LENGTH;
 
 #[test]
 fn accepts_empty_reference() {

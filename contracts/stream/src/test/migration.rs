@@ -227,7 +227,7 @@ fn documented_v1_names_are_all_real_entry_points() {
     }
 }
 
-/// The counts §3 states are the counts the ABI actually has — so "v1 exposes 16
+/// The counts §3 states are the counts the ABI actually has — so "v1 exposes 28
 /// core entrypoints plus 8 delegation entrypoints" cannot become untrue.
 #[test]
 fn the_documented_entrypoint_counts_match_the_abi() {
@@ -236,7 +236,7 @@ fn the_documented_entrypoint_counts_match_the_abi() {
     let delegation = abi.iter().filter(|n| is_delegation(n)).count();
 
     assert!(
-        MIGRATION_MD.contains("v1 exposes **16** core entrypoints"),
+        MIGRATION_MD.contains("v1 exposes **28** core entrypoints"),
         "docs/MIGRATION.md §3 must state the v1 core entrypoint count",
     );
     assert!(
@@ -244,8 +244,8 @@ fn the_documented_entrypoint_counts_match_the_abi() {
         "docs/MIGRATION.md §3 must state the delegation entrypoint count",
     );
     assert_eq!(
-        core, 16,
-        "the ABI has {core} core entrypoints, the doc says 16"
+        core, 28,
+        "the ABI has {core} core entrypoints, the doc says 28"
     );
     assert_eq!(
         delegation, 8,
@@ -484,6 +484,7 @@ fn the_collapsed_transfer_call_is_gated_by_the_immutable_flag() {
         &true,
         &true,
         &false, // transferable
+        &None,
     );
 
     assert_eq!(
@@ -546,6 +547,18 @@ fn the_walked_entry_points_are_exactly_the_ones_the_document_names() {
     let mut accounted: Vec<String> = documented_renames.iter().map(|(_, n)| n.clone()).collect();
     for extra in [
         "batch_withdraw",
+        "batch_cancel",
+        "batch_create",
+        "create_stream_with_curve",
+        "create_stream_with_cliff_mode",
+        "create_stream_via_factory",
+        "reclaim_dust",
+        "set_halt_operator",
+        "halt",
+        "resume_contract",
+        "halted",
+        "halt_operator",
+        "upgradeable",
         "batch_extend_ttl",
         "extend_stream_ttl",
         "refundable_of",

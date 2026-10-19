@@ -168,43 +168,33 @@ trial calls.
 | constant | value | applies to | notes |
 |---|---|---|---|
 | **`MAX_BATCH_SIZE`** | **16** | `batch_withdraw`, `batch_extend_ttl` | Maximum number of stream ids accepted in a single batch call. Requests with **more than 16 ids** return [`BatchTooLarge` (19)](#error). Chunk larger lists client-side; the SDK does this automatically. |
-| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (34)](#error). |
+| **`MAX_REFERENCE_LENGTH`** | **64** | `create_stream` | Maximum length in characters for the optional reference string. References exceeding this limit return [`InvalidReferenceLength` (40)](#error). |
 | `MIN_RATE_STROOPS_PER_SECOND` | 1 | `create_stream`, `top_up` | Enforced via `DepositRateTooLow` (5). Below 1 token unit per second the per-second rate truncates to zero and the recipient accrues nothing until the last instant. |
 
 ### Derivation of `MAX_BATCH_SIZE = 16`
 
 The binding mainnet constraint is the **contract event budget** (16,384 bytes per
-transaction), not entry or instruction counts. Each stream in a batch emits a
-`withdrawn` event plus the token's `transfer` event. Against the Stellar Asset
-Contract that is 512 bytes per stream, so a full batch of 16 spends 8,192 of the
-16,384-byte budget — a 2x margin. The other half of that cost belongs to the
-*token*, so a heavier transfer event moves the ceiling, which is why the number
-is re-derived by measurement rather than assumed.
+transaction). Each withdrawal emits the stream event and the token's transfer
+event. The current event schema includes sender and pause bookkeeping (#1868).
+Against the Stellar Asset Contract, a stream costs 624 event bytes: a batch of 16
+uses 9,984 bytes and leaves 6,400 bytes (39%) spare. Storage dimensions retain
+twofold headroom; the event dimension no longer has the old twofold margin.
 
-`test::token_batch_calibration` derives the implied ceiling for four token
-profiles of deliberately different cost:
+`test::token_batch_calibration` measures four token profiles:
 
 | token profile | per-transfer event bytes | events at 16 | implied ceiling |
 | --- | --- | --- | --- |
-| no transfer event | 0 | 4,416 / 16,384 | 59 |
-| Stellar Asset Contract (baseline) | 236 | 8,192 / 16,384 | 32 |
-| ~256-byte transfer event | 412 | 11,008 / 16,384 | 23 |
-| ~2 KB transfer event | 2,204 | 39,680 / 16,384 | 6 |
+| no transfer event | 0 | 6,208 / 16,384 | 42 |
+| Stellar Asset Contract (baseline) | 236 | 9,984 / 16,384 | 26 |
+| ~256-byte transfer event | 412 | 12,800 / 16,384 | 20 |
+| ~2 KB transfer event | 2,204 | 41,472 / 16,384 | 6 |
 
-**Sixteen is the measured ceiling for the Stellar Asset Contract and every
-lighter token, with the documented 2x safety factor.** A token with a heavier
-transfer event shifts the ceiling down — the ~2 KB profile admits 6, not 16 —
-and the contract cannot detect that, because the cost lives inside the token's
-own event. What it does enforce is the cap itself: more than 16 ids is rejected
-with [`BatchTooLarge` (19)](#error) before the token is touched, whatever the
-token is. `test::resource_limits` pins the event cost at the cap for the
-baseline token; `docs/KNOWN-LIMITATIONS.md` §3 records the per-token ceilings.
-`withdrawn` event plus the token's `transfer` event — 624 bytes per stream
-between them since issue #1868 appended the sender and the pause bookkeeping to
-`withdrawn`. With a heavier token event payload, 26 streams would risk
-exhausting the budget. **Sixteen is the measured ceiling leaving 6,400 bytes
-spare.** The measurement suite lives in `test::resource_limits` and runs in
-every CI build under the `Resource report` step.
+The batch cap stays **16**. The SAC test pins event usage at no more than 9,984
+bytes, so future event growth requires an explicit review of this baseline.
+All network resource limits remain enforced. A token with a heavy transfer event
+can require smaller chunks: the ~2 KB profile permits only 6 streams. The
+contract rejects more than 16 ids before touching a token, but cannot predict
+that token's internal event payload. See `docs/KNOWN-LIMITATIONS.md` §3.
 
 Client-side chunking is transparent to integrators: each chunk is a separate,
 atomic `batch_withdraw` or `batch_extend_ttl` call, and the SDK retries on
@@ -320,8 +310,13 @@ change the stored layout:
   created today writes none either — it pays no rent for a key that would merely
   restate the default. No migration is required for a live deployment.
 
-`get_stream` stitches the two together, so the `Stream` a caller sees always
-carries the effective curve.
+* Non-default cliff mode and a supplied reference are stored under
+  `DataKey::StreamMetadata(id)`, without altering the frozen v1 record. An absent
+  metadata entry means `Schedule` and `None`, preserving legacy decoding.
+* Mutations and keeper extensions renew existing curve and metadata entries
+  alongside their parent. Pure read methods renew none of these entries.
+
+`get_stream` combines the record, curve and metadata into the public `Stream`.
 
 ### Stream ID allocation
 
@@ -415,20 +410,26 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 31 | `InvalidTopUp` | Reserved; non-positive top-ups are rejected as `InvalidAmount` first. | reserved |
 | 32 | `TokenAmountMismatch` | Deposit pull changes pool balance by an unexpected amount. | reachable |
 | 33 | `VestedDecreased` | Reserved; current mutation paths preserve non-decreasing vested value. | reserved |
-| 34 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
 | 34 | `ContractHalted` | A state-changing entry point was called while the contract-level halt is engaged. | reachable |
 | 35 | `HaltOperatorAlreadySet` | `set_halt_operator` was called after an operator was already installed. | reachable |
 | 36 | `HaltOperatorNotSet` | `halt`/`resume_contract` was called on a contract with no operator installed. | reachable |
 | 37 | `ContractAlreadyHalted` | `halt` was called while the contract was already halted. | reachable |
 | 38 | `ContractNotHalted` | `resume_contract` was called while the contract was not halted. | reachable |
-| 33 | `VestedDecreased` | Reserved; defensive invariant — the randomized operation-sequence search in `test::vested_decreased` finds no path that lowers vested. | reserved |
+| 39 | `PoolBalanceDrift` | A funds-moving operation found the pool's real token balance below the total Fluxora accounts for. | reachable |
+| 40 | `InvalidReferenceLength` | Reference exceeds MAX_REFERENCE_LENGTH (64 bytes). | reachable |
+| 41 | `FactoryPaused` | The selected factory has paused stream creation. | reachable |
+| 42 | `DepositExceedsCap` | Deposit exceeds the selected factory cap. | reachable |
+| 43 | `DurationBelowMinimum` | Duration is below the selected factory minimum. | reachable |
+| 44 | `TokenNotAllowlisted` | Token is absent from the selected factory allowlist. | reachable |
+| 45 | `RateBelowMin` | Rate is below the selected factory minimum. | reachable |
+| 46 | `RateAboveMax` | Rate exceeds the selected factory maximum. | reachable |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Fluxora's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
 * `TokenTransferFailed` — the token contract returned a typed contract error: insufficient sender balance, pool underfunded on a payout, the token's own authorization rules refused the call, or the token returned a non-success value such as `false` rather than reverting. Fluxora treats all of those as a failed transfer, not a successful deposit.
 * `TokenMissing` — the token address resolves to nothing (Abort / host trap); the stream references a non-deployed contract.
 * `TokenAmountMismatch` (32) — a deposit pull (`create_stream`, `top_up`, `delegate_top_up`) changed the pool's balance by something other than the requested amount. See "Token assumptions" below.
-* `PoolBalanceDrift` (34) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
+* `PoolBalanceDrift` (39) — the pool's real token balance fell below the balance Fluxora accounts for. Raised by the reconciliation at the end of every operation that moves pool funds: `withdraw`, `delegate_withdraw`, `batch_withdraw`, `cancel`, `delegate_cancel`, `top_up` and `delegate_top_up`. A shortfall means the token changed balances outside a transfer Fluxora was party to — an elastic-supply rebase — and the whole invocation reverts rather than paying one recipient out of another's claim. A *surplus* is tolerated, never reported; see "Token assumptions" below.
 
 The CLI and RPC render these as `Error(Contract, #N)`.
 
@@ -574,6 +575,8 @@ the tolerated-surplus boundary.
 | `cancel(stream_id)` | sender | — |
 | `reclaim_dust(stream_id)` | sender | `i128` recovered |
 | `batch_cancel(sender, stream_ids: Vec<u64>)` | sender | `BatchCancelOutcome` — [details](#batch_cancelsender-stream_ids-vecu64) |
+| `upgradeable()` | none | `bool` — always false; this deployment cannot be upgraded in place |
+| `create_stream_via_factory(factory, sender, recipient, token, deposit, start_time, end_time, cliff_time, cancellable, pausable, transferable)` | sender | `u64` — validates the selected factory policy before creating a stream |
 | `batch_create(sender, requests: Vec<BatchCreateRequest>)` | sender | `Vec<u64>` stream ids — creates up to `MAX_BATCH_SIZE` streams in one call |
 | `pause(stream_id)` / `resume(stream_id)` | sender | — |
 | `transfer_recipient(stream_id, new_recipient)` | recipient | — |
@@ -914,7 +917,7 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `TokenTransferFailed` | 25 | A payout's token transfer was rejected by the token contract (pool underfunded, or the token's own authorisation rules refused the call). The raw token discriminant is discarded — see the `Error` table above. |
 | `TokenMissing` | 26 | A payout's token address does not resolve to a deployed contract (host `Abort`). No funds moved. |
 | `MalformedStreamId` | 29 | A serialized element of `stream_ids` does not decode as a `u64`. |
-| `PoolBalanceDrift` | 34 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
+| `PoolBalanceDrift` | 39 | After every payout landed, one of the batch's tokens held less than the balance Fluxora accounts for — the token changed balances outside a transfer Fluxora was party to. Checked once per distinct token, and the batch reverts in full. |
 
 `StreamNotActive` (11) is reserved and is not returned here.
 | `StreamNotFound` | 1 | No readable entry for `stream_id`: the id was never issued, or its entry has been archived. Raised by `load_stream` before any other check. |
@@ -926,7 +929,7 @@ it calls (`validate_batch_ids`, `reject_duplicate_ids`, `accrual::withdrawable`,
 | `TopUpTooSmall` | 23 | `floor(amount * duration / deposited) == 0` — the top-up cannot buy even one second of schedule, so absorbing it would require raising the rate. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the deposit transfer (insufficient sender balance, trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
-| `PoolBalanceDrift` | 34 | After the pull landed, the token's pool balance was still short of the total Fluxora accounts for — a rebase since the last operation on this token. The top-up reverts in full. |
+| `PoolBalanceDrift` | 39 | After the pull landed, the token's pool balance was still short of the total Fluxora accounts for — a rebase since the last operation on this token. The top-up reverts in full. |
 
 This list was cross-checked against `FluxoraStream::top_up` in
 [`contracts/stream/src/lib.rs`](../contracts/stream/src/lib.rs) and the shared
@@ -967,7 +970,7 @@ refused batch has `refunded == 0` and names the element that stopped it.
 | parameter | type | valid range / constraints |
 |---|---|---|
 | `sender` | `Address` | The account that authorises the call and receives every refund. It is compared **by value** against each `Stream.sender`; the batch is rejected with `Unauthorized` (7) unless all of them match. A failed signature surfaces as a host authentication failure, not a typed `Error`. |
-| `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive — the same ceiling and the same derivation as `batch_withdraw`: the binding constraint is the contract event budget, not entry or instruction counts. A cap-sized `batch_cancel` settles in 8 832 of 16 384 event bytes (~552 bytes per element, one `cancelled` event plus one token `transfer`), so the event budget alone would allow ~29 streams in a batch; the 16 cap leaves room but not the same 2x margin `batch_withdraw` has on that dimension (`test::resource_limits`). Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
+| `stream_ids` | `Vec<u64>` | **1 to `MAX_BATCH_SIZE` (16) elements**, inclusive — the same ceiling and the same derivation as `batch_withdraw`: the binding constraint is the contract event budget, not entry or instruction counts. A cap-sized `batch_cancel` settles in 8 832 of 16 384 event bytes (~552 bytes per element, one `cancelled` event plus one token `transfer`), so the event budget alone would allow ~29 streams in a batch; the 16 cap leaves room but not a twofold margin on that dimension (`test::resource_limits`). Every element must decode as a `u64` (`MalformedStreamId` otherwise) and name a distinct existing stream in `0..stream_count()` (`StreamNotFound` otherwise). Empty → `EmptyBatch`; more than 16 → `BatchTooLarge`; a repeated id → `DuplicateStreamId`. |
 
 ##### Authorisation
 
@@ -1063,7 +1066,7 @@ Stops accrual and refunds the unvested remainder to the sender. The recipient ke
 * `Overflow` (22): Integer overflow occurred during the unvested remainder computation.
 * `TokenTransferFailed` (25): The token contract refused the refund transfer.
 * `TokenMissing` (26): The token contract does not exist.
-* `PoolBalanceDrift` (34): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
+* `PoolBalanceDrift` (39): After the refund (if any) left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. Checked even when the refund is zero, and the cancel reverts in full.
 
 **Events:**
 * `cancelled` — Emitted on success.
@@ -1089,7 +1092,7 @@ or wrong signature surfaces as a host authentication failure, not a typed
 | `Overflow` | 22 | Checked arithmetic overflow while computing vested/withdrawable amounts, or while updating `withdrawn` / `paused_total` in the shared withdrawal tail. Unreachable for any stream created through the contract under normal schedules. |
 | `TokenTransferFailed` | 25 | The token contract returned a typed error on the payout transfer (insufficient pooled balance, deauthorized recipient trustline, or token auth rules). |
 | `TokenMissing` | 26 | The stream's token address has no deployed code (host Abort / trap). |
-| `PoolBalanceDrift` | 34 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
+| `PoolBalanceDrift` | 39 | After the payout left the pool, the token held less than the balance Fluxora accounts for — a rebase since this token's last operation. The withdrawal reverts in full, so a pool that is merely *short* can never pay a recipient out of another stream's claim. |
 
 This list was cross-checked against `FluxoraStream::withdraw` and
 `FluxoraStream::apply_withdrawal` in
@@ -1235,7 +1238,7 @@ All validation errors are checked **before** the token transfer. A rejected crea
 | error | condition |
 |---|---|
 | `SelfStream` (6) | `sender == recipient` |
-| `InvalidReferenceLength` (34) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
+| `InvalidReferenceLength` (40) | Reference string exceeds `MAX_REFERENCE_LENGTH` (64 characters) |
 | `InvalidDeposit` (4) | `deposit ≤ 0` |
 | `InvalidTimeRange` (2) | `end_time ≤ start_time` (zero or negative duration) |
 | `InvalidCliff` (3) | `cliff_time < start_time` or `cliff_time > end_time` |

@@ -263,6 +263,11 @@ fn a_full_batch_cancel_keeps_headroom_on_every_limit() {
         .collect();
     h.advance(30 * DAY);
 
+    // Trace shadow memory is not a transaction resource; leave mainnet limits enabled.
+    h.env
+        .host()
+        .set_diagnostic_level(Default::default())
+        .unwrap();
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel at cap");
 
@@ -303,6 +308,10 @@ fn a_refused_batch_cancel_writes_nothing_per_stream() {
             .map(|_| h.create_simple(100 * ONE, 100 * DAY))
             .collect();
         h.advance(30 * DAY);
+        h.env
+            .host()
+            .set_diagnostic_level(Default::default())
+            .unwrap();
         h.client.batch_cancel(&h.sender, &h.ids(&ids));
         report(&h, "batch_cancel settled")
     };
@@ -325,6 +334,11 @@ fn a_refused_batch_cancel_writes_nothing_per_stream() {
     ids[locked_at] = locked;
     h.advance(30 * DAY);
 
+    // Trace shadow memory is not a transaction resource; leave mainnet limits enabled.
+    h.env
+        .host()
+        .set_diagnostic_level(Default::default())
+        .unwrap();
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel refused");
 
@@ -352,6 +366,10 @@ fn the_event_budget_holds_for_batch_cancel_at_the_cap() {
         .collect();
     h.advance(30 * DAY);
 
+    h.env
+        .host()
+        .set_diagnostic_level(Default::default())
+        .unwrap();
     h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel events");
 

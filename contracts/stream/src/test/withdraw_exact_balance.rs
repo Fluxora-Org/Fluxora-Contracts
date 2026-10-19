@@ -94,6 +94,9 @@ fn exact_withdrawable_midstream_clears_to_zero_and_stays_active() {
     assert_eq!(
         published,
         std::vec![Withdrawn {
+            sender: h.sender.clone(),
+            paused_at: None,
+            paused_total: 0,
             stream_id: id,
             recipient: h.recipient.clone(),
             amount: available,
@@ -175,6 +178,9 @@ fn exact_remaining_balance_at_end_time_flips_to_depleted() {
     assert_eq!(
         published,
         std::vec![Withdrawn {
+            sender: h.sender.clone(),
+            paused_at: None,
+            paused_total: 0,
             stream_id: id,
             recipient: h.recipient.clone(),
             amount: remaining,
@@ -233,6 +239,9 @@ fn exact_withdrawable_equal_to_the_full_deposit_depletes_in_one_call() {
     assert_eq!(
         published,
         std::vec![Withdrawn {
+            sender: h.sender.clone(),
+            paused_at: None,
+            paused_total: 0,
             stream_id: id,
             recipient: h.recipient.clone(),
             amount: available,

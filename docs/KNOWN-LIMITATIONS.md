@@ -343,15 +343,15 @@ event budget alone:
 
 | token profile | per-transfer event bytes | per-stream event bytes | events at 16 | implied ceiling |
 | --- | --- | --- | --- | --- |
-| no transfer event | 0 | 276 | 4,416 / 16,384 | 59 |
-| Stellar Asset Contract (baseline) | 236 | 512 | 8,192 / 16,384 | 32 |
-| ~256-byte transfer event | 412 | 688 | 11,008 / 16,384 | 23 |
-| ~2 KB transfer event | 2,204 | 2,480 | 39,680 / 16,384 | 6 |
+| no transfer event | 0 | 388 | 6,208 / 16,384 | 42 |
+| Stellar Asset Contract (baseline) | 236 | 624 | 9,984 / 16,384 | 26 |
+| ~256-byte transfer event | 412 | 800 | 12,800 / 16,384 | 20 |
+| ~2 KB transfer event | 2,204 | 2,592 | 41,472 / 16,384 | 6 |
 
 `MAX_BATCH_SIZE = 16` is safe for the first three. The Stellar Asset Contract
-keeps the documented 2x margin exactly (32 = 2 x 16), and even a ~256-byte
-transfer event still admits 23. The 2x factor remains a margin rather than a
-proof, but it now has a measured floor under it.
+leaves 6,400 event bytes spare, and a ~256-byte transfer event still admits 20
+streams. Twofold headroom applies to storage dimensions, not the expanded event
+schema. The SAC regression test pins its 16-stream event usage at 9,984 bytes.
 
 It is **not** safe for the ~2 KB profile, whose implied ceiling of 6 is below
 the cap. A 16-element batch against such a token cannot fit in the event budget,

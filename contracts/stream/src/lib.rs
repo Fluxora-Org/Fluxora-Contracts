@@ -107,7 +107,7 @@ pub use storage::{
 pub use types::op;
 pub use types::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
-    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+    Stream, StreamStatus, MAX_REFERENCE_LENGTH, MAX_SPLIT_RECIPIENTS, TOTAL_BPS,
 };
 
 use soroban_sdk::{
@@ -543,6 +543,7 @@ impl FluxoraStream {
         transferable: bool,
         reference: Option<String>,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
         sender.require_auth();
 
         Self::create_stream_inner(
@@ -652,6 +653,8 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
         Self::create_stream_inner(
             env,
             sender,
@@ -694,9 +697,8 @@ impl FluxoraStream {
         reference: Option<String>,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
-        // Emergency halt (#1818): refuse state changes before anything else.
-        Self::require_not_halted(&env)?;
-        sender.require_auth();
+        // The public creation entry point checks halt and sender authorization
+        // once before reaching this private per-item implementation.
 
         if sender == recipient {
             return Err(Error::SelfStream);
@@ -785,6 +787,7 @@ impl FluxoraStream {
         sender: Address,
         requests: Vec<BatchCreateRequest>,
     ) -> Result<Vec<u64>, Error> {
+        Self::require_not_halted(&env)?;
         if requests.is_empty() {
             return Err(Error::EmptyBatch);
         }
@@ -890,6 +893,8 @@ impl FluxoraStream {
         pausable: bool,
         transferable: bool,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
         // Load policy from the factory contract via cross-contract calls.
         // `get_factory_config` and `is_allowlisted` are permissionless read
         // views — no auth is required or consumed.
@@ -1563,7 +1568,7 @@ impl FluxoraStream {
         storage::save_stream(env, stream_id, stream);
 
         if refund > 0 {
-            storage::debit_pool(&env, &token, refund)?;
+            storage::debit_pool(env, &token, refund)?;
             token_transfer(
                 env,
                 &token,
@@ -1575,7 +1580,7 @@ impl FluxoraStream {
         // Reconcile the pool now the refund has left it. Checked even when the
         // refund was zero: a rebase since the last operation on this token is
         // exactly as dangerous with nothing to refund.
-        verify_pool_balance(&env, &token)?;
+        verify_pool_balance(env, &token)?;
 
         // Issue #1584: the event's `vested` is read off the settled stream by
         // the helper (`stream.deposited`, set above), so it cannot disagree with

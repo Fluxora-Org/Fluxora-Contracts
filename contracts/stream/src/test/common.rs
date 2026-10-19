@@ -219,6 +219,7 @@ impl<'a> Harness<'a> {
         let ledgers = seconds
             .saturating_add(storage::SECONDS_PER_LEDGER - 1)
             .saturating_div(storage::SECONDS_PER_LEDGER);
+        let ledgers = u32::try_from(ledgers).unwrap_or(u32::MAX);
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));

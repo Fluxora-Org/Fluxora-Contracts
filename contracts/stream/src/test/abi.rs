@@ -32,6 +32,7 @@ use soroban_sdk::xdr::{
     Limits, ReadXdr, ScSpecEntry, ScSpecEventParamLocationV0, ScSpecTypeDef, StringM,
 };
 
+use super::common::Harness;
 use crate::events::{
     Cancelled, ContractHalted, ContractResumed, HaltOperatorSet, Paused, RecipientTransferred,
     Resumed, StreamCreated, ToppedUp, TtlExtended, Withdrawn,
@@ -131,6 +132,9 @@ const AUTH: &[(&str, &str)] = &[
     ("resume_contract", "operator"),
     ("halted", "none"),
     ("halt_operator", "none"),
+    ("batch_create", "sender"),
+    ("create_stream_via_factory", "sender"),
+    ("upgradeable", "none"),
 ];
 
 fn auth_of(name: &str) -> &'static str {
@@ -255,13 +259,16 @@ fn errors_from_spec(entry: ScSpecEntry) -> Vec<ErrorCase> {
     let ScSpecEntry::UdtErrorEnumV0(e) = entry else {
         panic!("expected error-enum spec entry, got {entry:?}");
     };
-    e.cases
+    let mut cases: Vec<_> = e
+        .cases
         .iter()
         .map(|c| ErrorCase {
             name: spec_ident(&c.name),
             discriminant: c.value,
         })
-        .collect()
+        .collect();
+    cases.sort_by_key(|case| case.discriminant);
+    cases
 }
 
 fn event_from_spec(entry: ScSpecEntry) -> EventAbi {
@@ -292,6 +299,8 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_create_stream())),
         function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_curve(),
+        )),
+        function_from_spec(parse_spec(
             &FluxoraStream::spec_xdr_create_stream_with_cliff_mode(),
         )),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_top_up())),
@@ -327,10 +336,19 @@ fn current_inventory() -> Inventory {
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halted())),
         function_from_spec(parse_spec(&FluxoraStream::spec_xdr_halt_operator())),
     ];
+    functions.extend([
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_create())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reclaim_dust())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_via_factory(),
+        )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_upgradeable())),
+    ]);
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut types = vec![
         type_from_spec(parse_spec(&BatchCancelOutcome::spec_xdr())),
+        type_from_spec(parse_spec(&crate::BatchCreateRequest::spec_xdr())),
         type_from_spec(parse_spec(&Stream::spec_xdr())),
         type_from_spec(parse_spec(&StreamStatus::spec_xdr())),
         type_from_spec(parse_spec(&ReleaseCurve::spec_xdr())),
@@ -354,6 +372,10 @@ fn current_inventory() -> Inventory {
         event_from_spec(parse_spec(&ContractHalted::spec_xdr())),
         event_from_spec(parse_spec(&ContractResumed::spec_xdr())),
     ];
+    events.extend([
+        event_from_spec(parse_spec(&crate::events::DelegateGranted::spec_xdr())),
+        event_from_spec(parse_spec(&crate::events::DelegateRevoked::spec_xdr())),
+    ]);
     events.sort_by(|a, b| a.name.cmp(&b.name));
 
     Inventory {
@@ -505,6 +527,14 @@ fn frozen_v1() -> Inventory {
             "Result<u32, Error>",
         ),
     ];
+    functions.extend([
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_batch_create())),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_reclaim_dust())),
+        function_from_spec(parse_spec(
+            &FluxoraStream::spec_xdr_create_stream_via_factory(),
+        )),
+        function_from_spec(parse_spec(&FluxoraStream::spec_xdr_upgradeable())),
+    ]);
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
     let types = vec![
@@ -1265,16 +1295,10 @@ fn adding_a_struct_field_to_a_udt_is_breaking_and_needs_the_bump_we_took() {
     check_compatibility(&old, &new).unwrap();
 }
 
-/// `create_stream` is the v1 entry point and must keep its exact frozen
-/// signature, delegating to the mode-taking form with the default.
-///
-/// This is the whole reason the new capability is a *new method* rather than a
-/// new parameter on the old one: every deployed v1 caller — the TypeScript SDK,
-/// the frontend, `script/testnet-exercise.sh` — keeps compiling and keeps
-/// getting the behaviour it was written against. If someone ever collapses
-/// `cliff_mode` into `create_stream`, this fails.
+/// The v2 reference parameter is a deliberate signature break. Preserve every
+/// v1 argument and require the version bump without rewriting the v1 fixture.
 #[test]
-fn create_stream_keeps_its_frozen_v1_signature() {
+fn create_stream_preserves_v1_arguments_and_appends_reference_in_v2() {
     let frozen = frozen_v1();
     let current = current_inventory();
     let want = frozen
@@ -1287,9 +1311,17 @@ fn create_stream_keeps_its_frozen_v1_signature() {
         .iter()
         .find(|f| f.name == "create_stream")
         .expect("current spec has create_stream");
+    assert_eq!(have.inputs[..want.inputs.len()], want.inputs);
+    assert_eq!(have.inputs.len(), want.inputs.len() + 1);
     assert_eq!(
-        want, have,
-        "create_stream drifted from the frozen v1 signature"
+        have.inputs.last().unwrap(),
+        &param("reference", "Option<String>")
+    );
+    assert_eq!(have.outputs, want.outputs);
+    assert_eq!(have.auth, want.auth);
+    assert!(
+        current.abi_version > frozen.abi_version,
+        "the appended argument requires an ABI bump"
     );
 }
 
@@ -1418,6 +1450,7 @@ fn permissionless_methods_are_exactly_the_none_auth_set() {
             "batch_extend_ttl",
             "halted",
             "halt_operator",
+            "upgradeable",
         ]
     );
 }
@@ -1489,14 +1522,19 @@ fn release_curve_is_visible_across_the_generated_spec() {
         &param("curve", "ReleaseCurve"),
         "the curve must be the trailing parameter"
     );
-    // `create_stream` is untouched: same inputs, still ending in `bool`.
+    // The two public creation forms share the original ten inputs; one appends
+    // the optional reference and the other appends the explicit curve.
     let plain = inv
         .functions
         .iter()
         .find(|f| f.name == "create_stream")
         .unwrap();
-    assert_eq!(plain.inputs.len(), create_with_curve.inputs.len() - 1);
-    assert_eq!(plain.inputs.last().unwrap(), &param("transferable", "bool"));
+    assert_eq!(plain.inputs.len(), create_with_curve.inputs.len());
+    assert_eq!(plain.inputs[..10], create_with_curve.inputs[..10]);
+    assert_eq!(
+        plain.inputs.last().unwrap(),
+        &param("reference", "Option<String>")
+    );
 
     let stream = inv.types.iter().find(|t| t.name == "Stream").unwrap();
     assert!(
@@ -1536,9 +1574,13 @@ fn release_curve_is_visible_across_the_generated_spec() {
         .iter()
         .find(|e| e.name == "StreamCreated")
         .unwrap();
+    let at = created.data.iter().position(|p| p.name == "curve").unwrap();
     assert_eq!(
-        created.data.last().unwrap(),
-        &param("curve", "ReleaseCurve"),
-        "the curve must be appended to the StreamCreated payload"
+        created.data[at..],
+        [
+            param("curve", "ReleaseCurve"),
+            param("cliff_mode", "CliffMode"),
+            param("reference", "Option<String>"),
+        ]
     );
 }

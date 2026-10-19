@@ -197,7 +197,6 @@ fn discriminant_fixture_matches_source() {
         ("InvalidTopUp", Error::InvalidTopUp as u32),
         ("TokenAmountMismatch", Error::TokenAmountMismatch as u32),
         ("VestedDecreased", Error::VestedDecreased as u32),
-        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
         ("ContractHalted", Error::ContractHalted as u32),
         (
             "HaltOperatorAlreadySet",
@@ -206,6 +205,17 @@ fn discriminant_fixture_matches_source() {
         ("HaltOperatorNotSet", Error::HaltOperatorNotSet as u32),
         ("ContractAlreadyHalted", Error::ContractAlreadyHalted as u32),
         ("ContractNotHalted", Error::ContractNotHalted as u32),
+        ("PoolBalanceDrift", Error::PoolBalanceDrift as u32),
+        (
+            "InvalidReferenceLength",
+            Error::InvalidReferenceLength as u32,
+        ),
+        ("FactoryPaused", Error::FactoryPaused as u32),
+        ("DepositExceedsCap", Error::DepositExceedsCap as u32),
+        ("DurationBelowMinimum", Error::DurationBelowMinimum as u32),
+        ("TokenNotAllowlisted", Error::TokenNotAllowlisted as u32),
+        ("RateBelowMin", Error::RateBelowMin as u32),
+        ("RateAboveMax", Error::RateAboveMax as u32),
     ];
 
     assert_eq!(
@@ -1210,7 +1220,7 @@ fn vested_decreased_discriminant_value() {
 fn pool_balance_drift_discriminant_value() {
     assert_eq!(
         Error::PoolBalanceDrift as u32,
-        34,
+        39,
         "PoolBalanceDrift discriminant must be 39",
     );
 }

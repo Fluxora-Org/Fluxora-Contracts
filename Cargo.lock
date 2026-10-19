@@ -811,13 +811,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluxora-factory"
-version = "1.0.0"
-dependencies = [
- "soroban-sdk",
-]
-
-[[package]]
 name = "fluxora-provenance"
 version = "1.0.0"
 dependencies = [
@@ -833,6 +826,7 @@ dependencies = [
 name = "fluxora-stream"
 version = "1.0.0"
 dependencies = [
+ "fluxora_factory",
  "proptest",
  "serde_json",
  "soroban-sdk",
