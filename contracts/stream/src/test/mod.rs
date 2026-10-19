@@ -186,3 +186,7 @@ mod one_second_stream;
 // (`i128::MAX`), driven end to end through the public ABI on a dedicated
 // full-range asset; also pins the creation-guard boundary that rejects it.
 mod max_deposit;
+// Issue #2022 — `upgradeable` is the on-chain statement of the upgrade posture;
+// pin it to `false` (fresh, before any stream, after the halt operator acts)
+// and to the ABI snapshot's published flag.
+mod upgradeable;
