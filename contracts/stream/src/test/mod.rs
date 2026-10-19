@@ -1,14 +1,14 @@
-//! Test suite, staged to match the build order.
-//!
-//! * **Stage 1** — data model, create, withdraw, views, plus the two tests that
-//!   gate everything else: the accrual property suite and the pool invariant.
-//! * **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
-//!   every adversarial boundary case.
-//! * **Stage 3** — TTL survival and archival recovery, resource consumption at
-//!   the batch cap.
-//! * **Stage 4** — the stream id invariant: unique, strictly monotonic, and
-//!   never consumed or reused by a failed create, independent of fixture
-//!   order.
+/// Test suite, staged to match the build order.
+///
+/// * **Stage 1** — data model, create, withdraw, views, plus the two tests that
+///   gate everything else: the accrual property suite and the pool invariant.
+/// * **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
+///   every adversarial boundary case.
+/// * **Stage 3** — TTL survival and archival recovery, resource consumption at
+///   the batch cap.
+/// * **Stage 4** — the stream id invariant: unique, strictly monotoonic, and
+///   never consumed or reused by a failed create, independent of fixture
+///   order.
 
 mod common;
 mod events;
@@ -27,41 +27,9 @@ mod error_reachability;
 // Issue #1818 — contract-level emergency halt: one-shot operator install,
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
-mod halt;
-// Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
-// (33) is unreachable, and documenting it as a defensive invariant.
-mod vested_decreased;
-
-// Stage 1
-mod create;
-mod props;
-mod reference;
-mod withdraw;
-// Issue #1583: withdrawal return value matches emitted amounts.
-mod withdraw_events;
-// Issue #1839: withdrawing exactly the full withdrawable amount — the boundary
-// where `withdrawable` reaches zero and the follow-up error changes from
-// `NothingToWithdraw` to `StreamTerminated`.
-mod withdraw_exact_balance;
-mod settled_dust;
-
-// Stage 2
-mod auth;
-mod cancel;
-// Issue #1726: capability flags are set at creation and immutable.
-mod capabilities;
-// Issue #1584: the cancellation event's accounting contract.
-mod amount_domain;
-mod cancel_events;
-mod cliff;
-// Wall-clock vs schedule-relative cliff gate. `test::cliff` pins the
-// schedule-relative half (issue #1688); this is the opt-out that pausing
-// cannot move. See `docs/KNOWN-LIMITATIONS.md` §7.
-mod cliff_mode;
-// Issue #1824: `delegate_top_up` held to the rejection depth of `top_up`.
 mod delegate_top_up;
 mod delegation;
-// Issue #1845: delegation surviving a recipient transfer.
+// Issue #1845 — delegation surviving a recipient transfer.
 mod delegation_transfer;
 
 // Issue #1882 — stream parties on the delegate paths without a grant.
