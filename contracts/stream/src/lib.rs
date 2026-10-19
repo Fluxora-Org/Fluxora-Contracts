@@ -2065,6 +2065,19 @@ impl FluxoraStream {
     }
 
     /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
+    ///
+    /// # Idempotency / repeat submission
+    ///
+    /// This entry point is **not idempotent**: calling it twice in a row
+    /// applies the top-up twice. Each call pulls `amount` from the sender and
+    /// extends the schedule by the same `delta`, so two calls leave the stream
+    /// with `deposited + 2 * amount` and `end_time + 2 * delta` — the same
+    /// state as a single call with `2 * amount`. A retry after a timeout is
+    /// therefore *not* safe to submit blindly; the client must first confirm
+    /// whether the first call landed (e.g. by reading `get_stream`) before
+    /// resubmitting. This matches [`top_up`](Self::top_up), which has the same
+    /// repeat-application semantics; see `test::delegate_top_up_twice` for the
+    /// pinned behaviour and the token/event assertions.
     pub fn delegate_top_up(
         env: Env,
         stream_id: u64,
