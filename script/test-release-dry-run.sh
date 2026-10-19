@@ -15,6 +15,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DRY_RUN_BIN="$SCRIPT_DIR/release-dry-run.sh"
 
+echo "Checking shared release plan parity..."
+diff -u <("$REPO_ROOT/script/release.sh" --list-steps) <("$DRY_RUN_BIN" --list-steps)
+echo "   ✓ real release and dry-run use the same ordered release steps"
+
 TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t 'fluxora-test')"
 cleanup() {
   rm -rf "$TMP_DIR"

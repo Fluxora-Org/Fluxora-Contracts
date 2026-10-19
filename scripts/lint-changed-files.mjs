@@ -34,6 +34,23 @@ function run(cmd, args, opts = {}) {
   return result;
 }
 
+/**
+ * Names of every package in the current workspace.
+ *
+ * Returns `null` if `cargo metadata` fails, so callers can fall back to
+ * trusting the static path mapping rather than skipping a real lint.
+ */
+function workspacePackageNames() {
+  const meta = run("cargo", ["metadata", "--format-version", "1", "--no-deps"]);
+  if (meta.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(meta.stdout);
+    return new Set((parsed.packages || []).map((p) => p.name));
+  } catch {
+    return null;
+  }
+}
+
 function changedRustFiles() {
   // --diff-filter=d excludes deleted files (nothing to lint there).
   const diffArgs = ONLY_STAGED
@@ -108,13 +125,32 @@ function main() {
     if (f.startsWith("contracts/stream/")) packagesToLint.add("fluxora-stream");
     if (f.startsWith("contracts/factory/")) packagesToLint.add("fluxora-factory");
     if (f.startsWith("contracts/archival-probe/"))
-      packagesToLint.add("archival-probe");
-    if (f.startsWith("tools/provenance/")) packagesToLint.add("provenance");
+      packagesToLint.add("fluxora-archival-probe");
+    if (f.startsWith("tools/provenance/")) packagesToLint.add("fluxora-provenance");
   }
-  // Fallback: unrecognised path — lint the whole workspace to be safe.
+
+  // Drop mappings that have no corresponding package in this workspace. Some
+  // source trees exist without a crate (e.g. `contracts/factory/` holds tests
+  // but no `Cargo.toml`), and a non-existent `-p` spec makes cargo exit 1
+  // before it lints anything — failing the gate for a path that simply has no
+  // package to lint.
+  const existingPackages = workspacePackageNames();
+  const resolved = existingPackages
+    ? new Set(Array.from(packagesToLint).filter((p) => existingPackages.has(p)))
+    : packagesToLint;
+  for (const p of packagesToLint) {
+    if (!resolved.has(p)) {
+      console.log(
+        `[lint:changed] note: '${p}' is not a workspace package; ignoring its mapping.`
+      );
+    }
+  }
+
+  // Fallback: unrecognised (or unowned) paths — lint the whole workspace to be
+  // safe, matching the unrecognised-path behaviour.
   const pkgArgs =
-    packagesToLint.size > 0
-      ? Array.from(packagesToLint).flatMap((p) => ["-p", p])
+    resolved.size > 0
+      ? Array.from(resolved).flatMap((p) => ["-p", p])
       : ["--workspace"];
 
   console.log(

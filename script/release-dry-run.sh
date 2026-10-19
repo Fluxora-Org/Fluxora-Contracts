@@ -38,6 +38,15 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=script/release-steps.sh
+source "$SCRIPT_DIR/release-steps.sh"
+
+if [[ "${1:-}" == "--list-steps" ]]; then
+  print_release_steps
+  exit 0
+fi
+
 # ── Color & Log Helpers ───────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
   BOLD='\033[1m'

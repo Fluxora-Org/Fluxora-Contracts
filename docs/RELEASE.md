@@ -56,6 +56,7 @@ every push to `main` (after `lint`), or on a dispatch with
 | `script/release.sh` | **The only producer of release artifacts.** Clears any stale probe wasm left in the output directory by an earlier workspace build or a restored CI cache, builds exactly `-p fluxora-stream` for `wasm32v1-none` (never `--workspace`), then asserts `fluxora_stream.wasm` exists *and* that `fluxora_archival_probe.wasm` is absent. Output: `target/wasm32v1-none/release/fluxora_stream.wasm`. Exits non-zero if the probe would ship. | No (local build) |
 | `script/release-dry-run.sh` | Three-phase pre-flight before any deploy/upgrade: (1) offline validation — network id, contract-id/token strkey shape, artifact presence, size ≤ 128 KiB / 131 072 bytes, SHA-256, admin strkey, deployer identity; (2) read-only RPC validation — `getLatestLedger` health plus `stellar contract read` when a contract id is given; (3) write guard — **without `--confirm-write` it exits 0 having changed nothing**, with `--confirm-write` it runs `stellar contract deploy`. Flags: `--network`, `--rpc-url`, `--wasm`, `--contract-id`, `--source`, `--token`, `--admin`, `--expected-checksum`, `--confirm-write`, `--local-only`, `-h`. Exit codes: `0` success, `1` validation/execution failure, `2` bad arguments. | Only with `--confirm-write` |
 | `script/test-release-dry-run.sh` | Regression suite *for* `release-dry-run.sh`. Builds mock/empty/oversized artifacts and asserts exit codes and messages across happy path, network-id rules, strkey boundaries, checksum mismatch, size limit, init inputs, the write guard, and retry idempotency. Exits non-zero if any case fails. | No |
+| `script/release-steps.sh` | Shared ordered release plan consumed by both `release.sh` and `release-dry-run.sh`. Run either command with `--list-steps` to inspect the plan; `script/test-release-dry-run.sh` fails if their plans diverge. | No |
 | `script/provenance.sh` | Release-integrity gate. Subcommands: `build` (wasm build + generate + verify), `generate [dir]`, `verify [dir]`, `test`. Writes `provenance.json` (SLSA-shaped: git revision, rust toolchain, soroban-sdk version, target triple, profile) plus `SHASUMS` in `sha256sum` format next to the artifacts; `verify` re-hashes and fails the release on any drift. Release dir defaults to `target/<FLUXORA_WASM_TARGET>/release`. | No |
 | `script/local-sandbox-proof.sh` | End-to-end smoke test with **zero** network credentials: starts a `stellar/quickstart` Docker container in standalone mode, builds and deploys `fluxora_stream.wasm`, creates a stream, queries `get_stream`/`withdrawable_of`/`vested_of`/`refundable_of`/`stream_count`/`stream_exists`, then tears the container down. Requires `docker` and `stellar`. | No (throwaway container) |
 
@@ -172,6 +173,17 @@ script/release-dry-run.sh --network mainnet   --contract-id <C...> --wasm target
 Both must print `DRY-RUN SUCCESSFUL — NO NETWORK MUTATION PERFORMED` and exit 0.
 Nothing has been written yet.
 
+Re-check the ledger close time the TTL conversion assumes against the target
+network before deploying (`docs/KNOWN-LIMITATIONS.md` §5):
+
+```bash
+RPC_URL=<mainnet RPC URL> script/measure-ledger-close.sh --verify
+```
+
+A `COVERED` verdict means the margin still absorbs the observed close time; an
+`EXPOSED` one means the pinned constants must be re-measured and re-pinned
+(`docs/ledger-close-time.md` has the procedure) before this release ships.
+
 ### E. Deploy to testnet and exercise it
 
 Preferred (CI): merge to `main`. The push triggers the pipeline; when `lint`
@@ -281,8 +293,9 @@ Recorded so the runbook stays truthful; fix them in their own PRs.
   download step — so a mainnet deploy currently has to go through the manual
   path in §4 F (`script/release-dry-run.sh --confirm-write --network mainnet`)
   with environment approval arranged out of band.
-* **`script/test-release-dry-run.sh` is not wired into CI.** Run it locally in
-  step A; it is not a merge gate yet.
+* **`script/test-release-dry-run.sh` and a local-only release dry-run run in the
+  CI lint job.** This keeps release-plan parity and dry-run validation on every
+  pull request without contacting a network or requiring credentials.
 * **`docs/error.md` / `docs/streaming.md` do not exist**, so the relevant
   branches of `script/validate-doc-alignment.py` self-skip rather than check.
 * **`deploy-mainnet` environment approval must actually be configured.** The

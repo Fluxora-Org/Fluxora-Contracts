@@ -1,0 +1,51 @@
+{
+  "event": "Withdrawn",
+  "topic": "withdrawn",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "amount",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "withdrawn",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "deposited",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "status",
+      "type": "StreamStatus",
+      "topic": false
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": false
+    },
+    {
+      "name": "paused_at",
+      "type": "Option<u64>",
+      "topic": false
+    },
+    {
+      "name": "paused_total",
+      "type": "u64",
+      "topic": false
+    }
+  ]
+}

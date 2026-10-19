@@ -72,6 +72,32 @@ fn withdraw_max_transfers_everything_accrued() {
 }
 
 #[test]
+fn final_withdrawal_after_end_time_releases_exactly_the_remaining_balance() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(40 * DAY);
+    assert_eq!(h.client.withdraw(&id, &Some(300 * ONE)), 300 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 100 * ONE);
+    assert_eq!(h.balance(&h.recipient), 300 * ONE);
+    assert_eq!(h.pool(), 700 * ONE);
+
+    h.warp_to(T0 + 100 * DAY);
+
+    let remaining = h.client.withdrawable_of(&id);
+    assert_eq!(remaining, 700 * ONE);
+
+    let paid = h.client.withdraw(&id, &None);
+    assert_eq!(paid, 700 * ONE);
+    assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
+    assert_eq!(h.pool(), 0);
+    assert_eq!(h.get(id).withdrawn, 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    h.assert_pool_exact();
+}
+
+#[test]
 fn partial_withdrawals_leave_the_remainder_claimable() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);

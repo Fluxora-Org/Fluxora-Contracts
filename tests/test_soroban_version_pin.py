@@ -1,40 +1,34 @@
-import re
+import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "script" / "verify_soroban_version.py"
 
-def test_soroban_versions_agree():
-    # 1. Cargo.toml (Authoritative)
-    cargo_toml = REPO_ROOT / "Cargo.toml"
-    cargo_content = cargo_toml.read_text()
-    cargo_match = re.search(r'soroban-sdk\s*=\s*"([^"]+)"', cargo_content)
-    assert cargo_match is not None, "Could not find soroban-sdk pin in Cargo.toml"
-    cargo_version = cargo_match.group(1)
+spec = importlib.util.spec_from_file_location("verify_soroban_version", SCRIPT)
+verify_soroban_version = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(verify_soroban_version)
 
-    # 2. soroban_version.txt
-    soroban_txt = REPO_ROOT / "soroban_version.txt"
-    txt_version = soroban_txt.read_text().strip()
 
-    # 3. rust-toolchain.toml (comment)
-    rust_toml = REPO_ROOT / "rust-toolchain.toml"
-    rust_content = rust_toml.read_text()
-    rust_match = re.search(r'#\s*soroban-sdk\s+(\d+)\.x', rust_content)
-    assert rust_match is not None, "Could not find '# soroban-sdk <X>.x' comment in rust-toolchain.toml"
-    rust_major = rust_match.group(1)
-
-    # Validate major version
-    cargo_major = cargo_version.split('.')[0]
-    
-    error_msg = (
-        f"Mismatch detected!\n"
-        f"  Cargo.toml (authoritative): {cargo_version}\n"
-        f"  soroban_version.txt: {txt_version}\n"
-        f"  rust-toolchain.toml: {rust_major}.x\n\n"
-        "The authoritative source is Cargo.toml.\n"
-        "Updating the target version is a single documented edit:\n"
-        "1. Update `soroban-sdk` in Cargo.toml\n"
-        "2. Run `python script/update_soroban_version.py` to sync all records."
+def _write_records(root, cargo_version="27.0.5", text_version="27.0.5", toolchain_major="27"):
+    (root / "Cargo.toml").write_text(
+        f'[workspace.dependencies]\nsoroban-sdk = "{cargo_version}"\n', encoding="utf-8"
+    )
+    (root / "soroban_version.txt").write_text(f"{text_version}\n", encoding="utf-8")
+    (root / "rust-toolchain.toml").write_text(
+        f"# soroban-sdk {toolchain_major}.x\n[toolchain]\nchannel = \"1.97.1\"\n",
+        encoding="utf-8",
     )
 
-    assert txt_version == cargo_version, error_msg
-    assert rust_major == cargo_major, error_msg
+
+def test_soroban_versions_agree():
+    assert verify_soroban_version.check_versions(REPO_ROOT) == []
+
+
+def test_soroban_version_mismatches_are_reported(tmp_path):
+    _write_records(tmp_path, text_version="26.0.0", toolchain_major="26")
+
+    issues = verify_soroban_version.check_versions(tmp_path)
+
+    assert len(issues) == 2
+    assert "soroban_version.txt" in issues[0]
+    assert "rust-toolchain.toml" in issues[1]

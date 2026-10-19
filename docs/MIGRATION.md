@@ -1,5 +1,11 @@
 # Migration: `main` → `v1-rewrite`
 
+> **Upgrade posture: immutable.** v1 has no upgrade entry point, no admin key
+> and no settable parameters. A deployed v1 contract cannot be replaced in
+> place; changing the ABI means deploying a new contract at a new address. See
+> [docs/ABI.md](docs/ABI.md#upgrade-posture) for the full statement and its
+> consequences. This document is consistent with that decision throughout.
+
 Deletion audit for the v1 rewrite. Two questions, answered in order:
 
 1. What did the disabled tests cover, and is any of it now *silently* missing
@@ -89,16 +95,45 @@ For each: what it covered, and where that behaviour stands in v1.
 **Nothing in this table is silently missing.** Every item is either covered at
 least as well in v1, or dropped for a reason traceable to a v1 non-goal.
 
+The `id_monotonicity_upgrade.rs` row is the only place in this document where
+upgradeability is load-bearing for a deletion. It is dropped because v1 is
+immutable, not because monotonicity was judged unimportant: the property is
+tested, the upgrade dimension simply does not exist.
+
 ---
 
 ## 3. Behaviour deliberately removed
 
 The old contract set exposed **145 entrypoints** (100 stream, 16 factory, 29
-governance). v1 exposes **16** core entrypoints plus **8 delegation entrypoints**
+governance). v1 exposes **17** core entrypoints plus **8 delegation entrypoints**
 (`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
-total of **24**. The delegates are gated on per-operation grants
+total of **25**. The delegates are gated on per-operation grants
 (`docs/delegation-revocation.md`) and do not change the core surface the
-renames table below maps. Grouped by why:
+renames table below maps.
+
+The 17th core entrypoint is `create_stream_with_curve`, added by #1815. The
+rewrite landed 16; the curve entry point is a later, purely additive extension
+of `create_stream` — same authorization, same validation, same deposit pull —
+that takes the release shape as one extra argument. `create_stream` keeps its
+signature and its linear arithmetic, so the renames table below is unaffected.
+Grouped by why:
+governance). v1 exposes **21** core entrypoints plus **8 delegation entrypoints**
+(`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
+total of **29**. The delegates are gated on per-operation grants
+governance). v1 exposes **17** core entrypoints plus **8 delegation entrypoints**
+(`grant_delegate`, `revoke_delegate`, and the six `delegate_*` variants) for a
+total of **25**. `batch_cancel` joined the core surface after this document was
+written: a programme is wound down in one call, with a member that cannot be
+cancelled reported by its index in the submitted vector. The delegates are gated
+on per-operation grants
+total of **25**. The delegates are gated on per-operation grants
+(`docs/delegation-revocation.md`) and do not change the core surface the
+renames table below maps. The core count includes the five contract-level
+emergency-halt entry points added in #1818 (`set_halt_operator`, `halt`,
+`resume_contract`, `halted`, `halt_operator`) — see
+[Emergency halt](ABI.md#emergency-halt). They are not a revival of the removed
+admin pause: the halt is opt-in and one-shot, and a deployment that never
+installs an operator has no admin and no pause of any kind. Grouped by why:
 
 **Contradicts §6 (no admin, no upgradeability, no fees, no global pause)**
 `init`, `set_admin`, `upgrade`, `version`, `pause_protocol`, `resume_protocol`,
@@ -108,6 +143,11 @@ renames table below maps. Grouped by why:
 `set_stream_decommissioned`, `sweep_excess`, `get_protocol_fees_accrued`,
 `get_keeper_fee_split`, `set_max_rate_per_second`, plus the entire `factory`
 (16) and `governance` (29) contracts.
+
+`upgrade` and `version` are in this list because they are the entry points an
+upgradeable contract would need. v1 exposes neither, which is what makes the
+immutability claim in [docs/ABI.md](docs/ABI.md#upgrade-posture) checkable
+against the ABI rather than aspirational.
 
 > **Decision record — governance source removed (#1675).** The governance
 > contract was dropped here, but its source, `contracts/governance/src/lib.rs`
@@ -211,6 +251,31 @@ Two structural changes behind those signatures:
 * **Amounts are `i128`, not `u64`.** The SEP-41 interface uses `i128`; the
   frontend currently encodes amounts with `encodeU64`.
 
+Nothing in the table above changed. `create_stream` keeps its signature and its
+meaning: the cliff it stores is still judged on the stream clock, so a pause
+still pushes the gate out by `paused_total`. If you want a cliff that pausing
+cannot move, call the additive
+`create_stream_with_cliff_mode(sender, recipient, token, deposit, start, end, cliff, cliff_mode, cancellable, pausable, transferable)`
+and pass `CliffMode::WallClock`; `CliffMode::Schedule` is exactly what
+`create_stream` does internally. Decoders must be taught the new `cliff_mode`
+field on the `Stream` struct and on the `stream_created` payload — it was
+appended last in both, so a decoder that stops early keeps working.
+
+**Stored data is not carried across.** `cliff_mode` changes the `Stream` XDR
+layout, so a v2 reader cannot decode a v1 entry. This needs no migration path
+because v2 is a **new deployment at a new address** (see `docs/ABI.md`,
+"Upgrade posture"): v1 streams stay under the v1 contract id and keep working
+exactly as they always did, and the mode cannot be set on them retroactively.
+Migrating an existing stream onto the new contract means creating it again on
+the new address; there is no in-place conversion, by design. Asserted by
+`test::storage_keys::v1_layout_is_no_longer_decodable_and_that_is_deliberate`
+and `test::storage_keys::v2_layout_round_trips`.
+
+This is the immutability posture in practice: the only way to move a stream to
+a new ABI is to create it again on the new address. There is no `upgrade`
+entry point that could rewrite the stored layout in place, and there will not
+be one without a new deployment.
+
 ---
 
 ## 5. Downstream impact
@@ -278,6 +343,11 @@ encoding — which also removes the `u64`/`i128` class of bug permanently.
 
 Nothing here blocks stage 4.
 
+Action 5 is a v1.1 change to the ABI, which under the immutability posture
+means a new deployment at a new address rather than an in-place upgrade. That
+is why it is scoped as a v2 boundary in §7 rather than folded into the frozen
+v1 surface.
+
 ---
 
 ## 7. Rulings on the three judgement calls
@@ -308,7 +378,9 @@ keypair.
 So it lands in v1.1 with its own threat model and its own audit pass, not folded
 into the frozen v1 ABI. See [docs/ABI.md](docs/ABI.md) — adding an entry point
 means a new deployment at a new address, so this is a deliberate v2 boundary
-rather than something to squeeze in.
+rather than something to squeeze in. The immutability posture is what forces
+that boundary: there is no upgrade entry point through which a v1.1 entry point
+could be added to an already-deployed v1 contract.
 
 ### Withdrawal rate limiting — **stays out**
 
@@ -351,3 +423,32 @@ incentive is both narrow and adversarially shaped.
 The problem it solves is also not real in v1: an unwithdrawn stream costs the
 contract nothing, TTL is handled by the permissionless rent path, and the
 recipient's claim never expires.
+
+---
+
+## 8. How this document is tested
+
+The path above is walked, not just described. `contracts/stream/src/test/migration.rs`
+parses the §4 table out of this file and checks it against the code:
+
+* every name §4 sends a caller to is present in the committed ABI inventory
+  (`contracts/stream/abi/fluxora_stream.json`), and every name §4 says was left
+  behind is absent from it — so a rename that updates this file without updating
+  the contract, or the reverse, fails a named test;
+* the §3 counts are asserted against the ABI (16 core entry points plus 8
+  delegation entry points, and the old `100 + 16 + 29 = 145` breakdown), and the
+  §7 rulings are asserted as absences;
+* the upgrade posture is asserted as an absence: no `upgrade` and no `version`
+  entry point appears in the committed ABI inventory, so a change that added
+  one without updating this document and `docs/ABI.md` would fail a named test;
+* the migration is then performed end to end, using only the v1 spellings this
+  document lists, with the documented semantics asserted for each: `top_up`
+  extends duration and never the rate, `transfer_recipient` is one step gated by
+  the immutable `transferable` flag, `withdraw(id, None)` takes everything
+  accrued, and `pause`/`resume`/`cancel` read the sender from the stream. State
+  is re-checked as intact after every step.
+
+Edit this file and the code together; the test exists to make sure you do.
+The same applies to the upgrade posture: it is a property of the ABI, so it is
+checked against the ABI, not merely stated here.
+

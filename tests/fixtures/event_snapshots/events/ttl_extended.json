@@ -1,0 +1,16 @@
+{
+  "event": "TtlExtended",
+  "topic": "ttl_extended",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "extended_to_ledgers",
+      "type": "u32",
+      "topic": false
+    }
+  ]
+}

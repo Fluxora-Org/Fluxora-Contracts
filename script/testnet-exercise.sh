@@ -17,8 +17,9 @@
 #
 # What it deliberately does NOT cover: the archival restore round trip. Testnet's
 # min_persistent_ttl is 120,960 ledgers (~7 days), a network floor no contract
-# can undercut, so a genuine archival cannot be observed in a single run. See
-# script/local-archival-proof.sh and docs/KNOWN-LIMITATIONS.md §1.
+# can undercut, so a genuine archival cannot be observed in a single run. That one
+# is the archival canary's job — script/archival-canary.sh, with the recorded
+# result in docs/KNOWN-LIMITATIONS.md §1.
 
 set -euo pipefail
 

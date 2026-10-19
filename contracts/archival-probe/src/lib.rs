@@ -7,17 +7,24 @@
 //! ## What it is for
 //!
 //! The SDK's test host runs storage in recording mode, where reading an expired
-//! persistent entry is silently auto-restored rather than failing. So the unit
-//! suite proves that crossing the archive/restore boundary preserves accounting,
-//! but it never sees the live-network sequence:
+//! persistent entry is silently auto-restored rather than failing. The unit
+//! suite therefore proves that crossing the archive/restore boundary preserves
+//! accounting, but on its own it cannot say what a live network does at that
+//! boundary.
+//!
+//! On testnet, 2026-09-28, it turned out to do the same thing (protocol 23 and
+//! later): an invocation that touched an archived entry restored it in place,
+//! succeeded, and returned the value intact. There was no failed read and no
+//! `RestoreFootprint` resubmission. This probe is what established that; see
+//! `docs/KNOWN-LIMITATIONS.md` §1 for the recorded run and the reasoning.
 //!
 //! ```text
-//!   read archived entry  ->  transaction FAILS
-//!   resubmit with RestoreFootprint
-//!   read again           ->  succeeds, data intact
+//!   read archived entry  ->  transaction succeeds, entry restored by it
 //! ```
 //!
-//! See `docs/KNOWN-LIMITATIONS.md` §1.
+//! The probe now serves as the record of that measurement, and as the thing
+//! `script/archival-canary.sh --round-trip` re-asserts if anyone wants to know
+//! whether a future protocol changed it back.
 //!
 //! ## Why a separate contract
 //!
@@ -36,8 +43,8 @@
 //! ## What it deliberately does not do
 //!
 //! No auth, no tokens, no value of any kind. It holds a single symbol. If it
-//! archives and is never restored, nothing is lost. Do not build on it, and do
-//! not deploy it to mainnet.
+//! archives and is never touched again, nothing is lost. Do not build on it,
+//! and do not deploy it to mainnet.
 //!
 //! ## Release isolation (issue #1543)
 //!
@@ -89,9 +96,10 @@ impl ArchivalProbe {
 
     /// Read the canary.
     ///
-    /// Once the entry archives, invoking this fails at the network level before
-    /// the contract body runs — the caller must resubmit with a
-    /// `RestoreFootprint` operation. That failure is the behaviour under test.
+    /// If the entry has archived, this is the invocation that restores it: the
+    /// ledger resurrects the archived entries named in the transaction footprint
+    /// and the call proceeds, charging the rent to this transaction. The read
+    /// does not fail, which is the behaviour the canary measured.
     pub fn read(env: Env) -> Result<Symbol, Error> {
         env.storage()
             .persistent()
@@ -101,8 +109,10 @@ impl ArchivalProbe {
 
     /// Whether the canary is present and live.
     ///
-    /// Mirrors `FluxoraStream::stream_exists`: this is the signal an SDK keys
-    /// on to tell "never existed" apart from "archived, needs restoring".
+    /// Mirrors `FluxoraStream::stream_exists`. It is **not** an archived-state
+    /// signal: a read is what restores an archived entry, so a caller polling
+    /// this cannot observe the archived state at all — it answers `true` either
+    /// way. Pinned by `test::presence_stays_true_across_archival`.
     pub fn planted(env: Env) -> bool {
         env.storage().persistent().has(&Key::Canary)
     }
