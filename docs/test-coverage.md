@@ -67,6 +67,13 @@ python3 script/check_coverage_floors.py --reports-dir coverage
 gate then compares each crate against its own floor. The `coverage/` directory
 is generated output and is not committed.
 
+Tarpaulin's package selector chooses the test binaries, but its source discovery
+still scans the workspace. Each measurement therefore includes only files under
+that crate's directory and excludes conventional test paths (`tests/`,
+`src/test.rs`, and `src/test/`). Production source files, including binary entry
+points and uncovered code, remain in the denominator. This prevents another
+crate's legacy test helpers from diluting an otherwise unrelated report.
+
 Useful environment variables: `COVERAGE_TIMEOUT` (per-test timeout, default
 300s, raised above tarpaulin's 60s default because instrumented proptest suites
 exceed it) and `CARGO_TARPAULIN_VERSION`.
