@@ -138,6 +138,9 @@ mod event_ordering_failed_transfer;
 // asserted after failed creations, after every terminal operation, under
 // deliberate counter corruption, and across randomized sequences.
 mod stream_count_consistency;
+// Issue — `stream_count` boundary behaviour: zero, one, the maximum accepted
+// value, and one past it (refused with a typed error, never a panic).
+mod stream_count_boundaries;
 
 // Issue #1686: every read entry point's storage/TTL behaviour, pinned to
 // docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
