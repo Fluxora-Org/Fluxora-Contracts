@@ -204,7 +204,7 @@ fn a_batch_of_cancellations_matches_the_same_cancels_done_one_at_a_time() {
         // 16 refunds. Keep actual network resource enforcement enabled.
         h.env
             .host()
-            .set_diagnostic_level(Default::default())
+            .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
             .unwrap();
         let outcome = h.client.batch_cancel(&h.sender, &h.ids(&stream_ids));
         h.assert_pool_exact();
@@ -548,10 +548,10 @@ fn batch_cancel_size_exactly_max_succeeds() {
         .map(|_| h.create_simple(100 * ONE, 100 * DAY))
         .collect();
     h.advance(5 * DAY);
-    // Disable debug tracing only; the SDK still enforces all mainnet limits.
+    // Give debug tracing its own bounded allowance; mainnet limits are unchanged.
     h.env
         .host()
-        .set_diagnostic_level(Default::default())
+        .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
         .unwrap();
 
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&stream_ids));

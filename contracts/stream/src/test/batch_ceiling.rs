@@ -93,7 +93,7 @@ impl EntryPoint {
         // Network resource limits and contract events remain fully enabled.
         h.env
             .host()
-            .set_diagnostic_level(Default::default())
+            .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
             .unwrap();
         match self {
             EntryPoint::Cancel => match h.client.try_batch_cancel(&h.sender, &ids) {
