@@ -63,6 +63,10 @@ mod delegate_top_up;
 mod delegation;
 // Issue #1845: delegation surviving a recipient transfer.
 mod delegation_transfer;
+// Repeat-submission coverage for `delegate_pause`: a second call is refused
+// with `StreamAlreadyPaused`, state is preserved, no tokens move, and no
+// event is emitted for the refused call.
+mod delegate_pause_repeat;
 
 // Issue #1882 — stream parties on the delegate paths without a grant.
 mod delegate_party_without_grant;

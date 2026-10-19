@@ -2007,6 +2007,18 @@ impl FluxoraStream {
     }
 
     /// Pause as a delegate. Requires [`op::PAUSE`] grant.
+    ///
+    /// # Repeat-submission behaviour
+    ///
+    /// A second call with the same `stream_id` and `delegate` after the stream
+    /// is already `Paused` is **refused** with [`Error::StreamAlreadyPaused`].
+    /// It is *not* a no-op: accepting it silently would overwrite `paused_at`
+    /// with the later timestamp, silently erasing the accrued paused duration
+    /// and reducing the amount the recipient eventually receives.
+    ///
+    /// Callers retrying after a timeout must branch on the returned error:
+    /// `StreamAlreadyPaused` means the first submission landed and the stream
+    /// is already frozen; any other error means the operation genuinely failed.
     pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
         Self::require_not_halted(&env)?;
