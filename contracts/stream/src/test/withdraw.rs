@@ -1,7 +1,5 @@
 //! Stage 1 — `withdraw`: linear accrual, partial draws, boundaries, depletion.
 
-//! Stage 1 — `withdraw`: linear accrual, partial draws, boundaries, depletion.
-
 use super::common::*;
 use crate::{Error, StreamStatus};
 
@@ -153,89 +151,6 @@ fn requesting_more_than_available_is_rejected() {
     h.assert_pool_exact();
 }
 
-// --- Numeric boundary pinning --------------------------------------------
-
-/// Zero and one are the two smallest accepted amounts and must both be
-/// honoured exactly: zero is refused with `InvalidAmount`, one is paid out.
-#[test]
-fn withdraw_zero_and_one_are_pinned() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.advance(30 * DAY);
-
-    let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
-    assert_eq!(err, Error::InvalidAmount);
-    assert_eq!(h.get(id).withdrawn, 0);
-
-    assert_eq!(h.client.withdraw(&id, &Some(1)), 1);
-    assert_eq!(h.get(id).withdrawn, 1);
-    assert_eq!(h.balance(&h.recipient), 1);
-    h.assert_pool_exact();
-}
-
-/// The maximum accepted value is exactly the withdrawable balance; it must
-/// succeed and drain the stream.
-#[test]
-fn withdraw_max_accepted_value_succeeds() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.advance(30 * DAY);
-
-    let available = h.client.withdrawable_of(&id);
-    assert!(available > 0);
-
-    let paid = h.client.withdraw(&id, &Some(available));
-    assert_eq!(paid, available);
-    assert_eq!(h.get(id).withdrawn, available);
-    assert_eq!(h.client.withdrawable_of(&id), 0);
-    assert_eq!(h.balance(&h.recipient), available);
-    h.assert_pool_exact();
-}
-
-/// One past the maximum accepted value must be refused with the documented
-/// error and leave state untouched.
-#[test]
-fn withdraw_one_past_max_is_refused_with_typed_error() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.advance(30 * DAY);
-
-    let available = h.client.withdrawable_of(&id);
-    assert!(available > 0);
-
-    let err = h
-        .client
-        .try_withdraw(&id, &Some(available + 1))
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::InsufficientWithdrawable);
-
-    assert_eq!(h.get(id).withdrawn, 0);
-    assert_eq!(h.balance(&h.recipient), 0);
-    h.assert_pool_exact();
-}
-
-/// The absolute maximum accepted value for the whole deposit is the deposit
-/// itself; requesting it at end time succeeds, and one past it is refused.
-#[test]
-fn withdraw_deposit_max_and_one_past_are_pinned() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.warp_to(T0 + 100 * DAY);
-
-    let err = h
-        .client
-        .try_withdraw(&id, &Some(1_000 * ONE + 1))
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(err, Error::InsufficientWithdrawable);
-    assert_eq!(h.get(id).withdrawn, 0);
-
-    assert_eq!(h.client.withdraw(&id, &Some(1_000 * ONE)), 1_000 * ONE);
-    assert_eq!(h.get(id).status, StreamStatus::Depleted);
-    h.assert_pool_exact();
-}
-
 #[test]
 fn explicit_zero_or_negative_amount_is_rejected() {
     let h = Harness::new();
@@ -314,6 +229,95 @@ fn repeated_zero_withdraw_calls_are_rejected_and_preserve_state() {
         let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
         assert_eq!(err, Error::InvalidAmount);
     }
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
+
+// --- Numeric boundary pinning --------------------------------------------
+
+/// Zero and one are the two smallest accepted amounts. Zero is refused with
+/// `InvalidAmount`; one is honored when it is exactly what has accrued.
+#[test]
+fn withdraw_amount_zero_and_one_are_pinned() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    // Zero is always refused, regardless of available balance.
+    let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    // One is accepted when it is within the accrued amount.
+    assert_eq!(h.client.withdraw(&id, &Some(1)), 1);
+    assert_eq!(h.get(id).withdrawn, 1);
+    assert_eq!(h.balance(&h.recipient), 1);
+    h.assert_pool_exact();
+}
+
+/// The maximum accepted amount is exactly the withdrawable balance. It must
+/// succeed and leave nothing behind.
+#[test]
+fn withdraw_max_accepted_amount_succeeds() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let max_accepted = h.client.withdrawable_of(&id);
+    assert!(max_accepted > 0);
+    assert_eq!(h.client.withdraw(&id, &Some(max_accepted)), max_accepted);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    assert_eq!(h.get(id).withdrawn, max_accepted);
+    assert_eq!(h.balance(&h.recipient), max_accepted);
+    h.assert_pool_exact();
+}
+
+/// One past the maximum accepted amount is refused with the documented
+/// `InsufficientWithdrawable` error and changes nothing.
+#[test]
+fn withdraw_one_past_max_is_refused() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let max_accepted = h.client.withdrawable_of(&id);
+    assert!(max_accepted > 0);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(max_accepted + 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
+    // The refusal is a typed error and left state untouched.
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
+
+/// The extreme numeric boundaries must never panic: `i128::MIN` is refused as
+/// `InvalidAmount`, and `i128::MAX` is refused as `InsufficientWithdrawable`.
+#[test]
+fn withdraw_extreme_numeric_boundaries_do_not_panic() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(i128::MIN))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(i128::MAX))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
     assert_eq!(h.get(id).withdrawn, 0);
     assert_eq!(h.balance(&h.recipient), 0);
     h.assert_pool_exact();
