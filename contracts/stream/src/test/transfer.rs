@@ -340,7 +340,10 @@ fn retrying_a_transfer_is_idempotent() {
 
     h.client.transfer_recipient(&id, &h.other);
     let retry_events = h.env.events().all().filter_by_contract(&h.contract_id);
-    assert!(retry_events.events().is_empty(), "retry emits no state-changing event");
+    assert!(
+        retry_events.events().is_empty(),
+        "retry emits no state-changing event"
+    );
     assert_eq!(h.get(id).recipient, h.other);
     assert_eq!(h.balance(&h.recipient), 0);
     assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
