@@ -28,6 +28,10 @@ mod error_reachability;
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
 mod halt;
+// Issue — `halt` driven from every stream status (Active, Paused, Cancelled,
+// Matured): each outcome asserted as a value or typed error, and a terminal
+// stream left unmutated by a refused call.
+mod halt_status;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;
