@@ -16,6 +16,7 @@ __pycache__/
 # and must never be committed (see docs/test-coverage.md).
 /coverage/
 
+temp_auto_push.bat
 # Test snapshots
 **/test_snapshots/
 .target/
@@ -34,3 +35,5 @@ test_snapshots/
 batch_test_output.txt
 script/testnet-exercise.log
 *.log
+.gitignore
+branch_structure.json
