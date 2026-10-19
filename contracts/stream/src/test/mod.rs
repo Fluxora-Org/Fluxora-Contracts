@@ -28,6 +28,10 @@ mod error_reachability;
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
 mod halt;
+// Issue #2047 — `halt` boundary behaviour: zero, one, the maximum accepted
+// value, and one past it, pinned on both the halt state and the ledger
+// timestamp it records. Every refusal is a typed error and nothing panics.
+mod halt_boundaries;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;
