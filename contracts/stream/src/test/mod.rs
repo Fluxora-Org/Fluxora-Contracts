@@ -138,6 +138,7 @@ mod event_ordering_failed_transfer;
 // asserted after failed creations, after every terminal operation, under
 // deliberate counter corruption, and across randomized sequences.
 mod stream_count_consistency;
+mod stream_count_states;
 
 // Issue #1686: every read entry point's storage/TTL behaviour, pinned to
 // docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
