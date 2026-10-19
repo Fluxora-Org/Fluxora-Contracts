@@ -727,6 +727,7 @@ fn paused_exactly_at_the_cliff_instant_leaves_the_gate_open() {
             sender: h.sender.clone(),
             paused_at: cliff,
             paused_total: 0,
+            recipient: h.recipient.clone(),
         }
         .to_xdr(&h.env, &h.contract_id)],
         "the paused event must pin the freeze point to the cliff instant"
@@ -798,6 +799,9 @@ fn paused_exactly_at_the_cliff_instant_leaves_the_gate_open() {
             withdrawn: s.withdrawn,
             deposited: s.deposited,
             status: s.status,
+            sender: h.sender.clone(),
+            paused_at: s.paused_at,
+            paused_total: s.paused_total,
         }
         .to_xdr(&h.env, &h.contract_id)],
         "the withdrawn event must match post-call storage exactly"
