@@ -2402,6 +2402,15 @@ impl FluxoraStream {
     /// [`halt`](Self::halt) and [`resume_contract`](Self::resume_contract): it
     /// cannot move funds, cancel a stream, change a schedule, or withdraw. It
     /// also cannot be removed.
+    ///
+    /// # Repeat submission
+    ///
+    /// A second call is **refused** with [`Error::HaltOperatorAlreadySet`]
+    /// rather than silently accepted. This is the safe choice for a retry
+    /// after a client timeout: the first call's effect (operator installed,
+    /// `halt_operator_set` event emitted) is left exactly as it was, no
+    /// second event is emitted, and no token balance moves on either call —
+    /// this entry point never touches the token pool.
     pub fn set_halt_operator(env: Env, operator: Address) -> Result<(), Error> {
         operator.require_auth();
         if storage::halt_operator(&env).is_some() {
