@@ -1,10 +1,11 @@
 //! Stage 2 — recipient transfer.
 
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::events::Event as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::Address;
 
 use super::common::*;
-use crate::Error;
+use crate::{events, Error};
 
 #[test]
 fn transfer_redirects_future_payouts() {
@@ -85,6 +86,36 @@ fn transferring_to_the_current_recipient_is_a_no_op() {
 
     h.client.transfer_recipient(&id, &h.recipient);
     assert_eq!(h.get(id), before);
+}
+
+#[test]
+fn retrying_a_transfer_is_idempotent() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.client.transfer_recipient(&id, &h.other);
+    let first_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    assert_eq!(first_events.events().len(), 1);
+    assert_eq!(
+        first_events.events().last().unwrap(),
+        &events::RecipientTransferred {
+            stream_id: id,
+            old_recipient: h.recipient.clone(),
+            new_recipient: h.other.clone(),
+        }
+        .to_xdr(&h.env, &h.contract_id),
+    );
+    assert_eq!(h.get(id).recipient, h.other);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+
+    h.client.transfer_recipient(&id, &h.other);
+    let retry_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    assert!(retry_events.events().is_empty(), "retry emits no state-changing event");
+    assert_eq!(h.get(id).recipient, h.other);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+    h.assert_pool_exact();
 }
 
 // --- Guards ---------------------------------------------------------------

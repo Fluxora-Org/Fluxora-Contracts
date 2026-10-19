@@ -559,6 +559,10 @@ impl FluxoraStream {
     ///
     /// Any balance the old recipient had already accrued but not withdrawn moves
     /// with the stream. Recipients should withdraw before transferring.
+    ///
+    /// Repeating the same reassignment is idempotent: a second call with the
+    /// current recipient is a no-op, leaves the stream state unchanged, and
+    /// emits no second `recipient_transferred` event.
     pub fn transfer_recipient(
         env: Env,
         stream_id: u64,
