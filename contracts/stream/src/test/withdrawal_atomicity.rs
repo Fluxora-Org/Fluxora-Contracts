@@ -170,7 +170,7 @@ impl<'a> RevocableHarness<'a> {
             &true,
             &true,
             &true,
-        )
+            &None,)
     }
 
     /// Full-control stream creation.
@@ -196,7 +196,7 @@ impl<'a> RevocableHarness<'a> {
             &cancellable,
             &pausable,
             &transferable,
-        )
+            &None,)
     }
 }
 

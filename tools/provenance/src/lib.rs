@@ -717,17 +717,29 @@ targets = ["wasm32v1-none"]
         assert!(status.success(), "git {args:?} failed");
     }
 
-    fn scratch_repo() -> Scratch {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let root = tmp.path().to_path_buf();
+    /// The three files `collect_metadata` reads, so a scratch dir behaves like
+    /// a real workspace root.
+    fn write_workspace_files(root: &Path) {
         fs::write(root.join("Cargo.toml"), FAKE_WORKSPACE).unwrap();
         fs::write(root.join("Cargo.lock"), FAKE_LOCK).unwrap();
         fs::write(root.join("rust-toolchain.toml"), FAKE_TOOLCHAIN).unwrap();
-        git(&root, &["init", "-q"]);
-        git(&root, &["config", "user.email", "test@example.com"]);
-        git(&root, &["config", "user.name", "Test"]);
-        git(&root, &["add", "-A"]);
-        git(&root, &["commit", "-qm", "init"]);
+    }
+
+    /// `git init` plus a committed baseline, so `git rev-parse HEAD` yields a
+    /// stable revision.
+    fn init_repo(root: &Path) {
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "test@example.com"]);
+        git(root, &["config", "user.name", "Test"]);
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-qm", "init"]);
+    }
+
+    fn scratch_repo() -> Scratch {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        write_workspace_files(&root);
+        init_repo(&root);
         let release = root.join("target").join("wasm32v1-none").join("release");
         fs::create_dir_all(&release).unwrap();
         Scratch {
@@ -735,6 +747,24 @@ targets = ["wasm32v1-none"]
             root,
             release,
         }
+    }
+
+    /// A workspace root plus a release dir that lives *outside* it, so a test
+    /// can tell the explicit `workspace_root` argument apart from discovery.
+    fn detached_release() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("workspace");
+        fs::create_dir_all(&root).unwrap();
+        write_workspace_files(&root);
+        init_repo(&root);
+        let release = tmp.path().join("out").join("release");
+        fs::create_dir_all(&release).unwrap();
+        (tmp, root, release)
+    }
+
+    /// Re-read a manifest from disk, as `verify` does.
+    fn read_manifest(path: &Path) -> Manifest {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
     fn write_wasm(release: &Path, name: &str, content: &[u8]) {
@@ -850,7 +880,33 @@ targets = ["wasm32v1-none"]
     #[test]
     fn workspace_root_is_discovered_from_the_release_dir() {
         let s = scratch_repo();
-        assert_eq!(find_workspace_root(&s.release).unwrap(), s.root);
+        // `find_workspace_root` canonicalizes the path it is given, so the
+        // expectation has to be canonical too: on macOS `tempdir()` hands out
+        // `/var/...`, which canonicalizes to `/private/var/...`, and comparing
+        // against the raw temp path fails there (it passes on Linux, where no
+        // such symlink exists).
+        assert_eq!(
+            find_workspace_root(&s.release).unwrap(),
+            s.root.canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn workspace_root_discovery_walks_up_and_ignores_non_workspace_manifests() {
+        let s = scratch_repo();
+        // A member crate whose own manifest has no `[workspace]` table must not
+        // terminate the walk.
+        let nested = s.root.join("contracts").join("stream");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("Cargo.toml"),
+            "[package]\nname = \"fluxora-stream\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let expected = s.root.canonicalize().unwrap();
+        assert_eq!(find_workspace_root(&nested).unwrap(), expected);
+        assert_eq!(find_workspace_root(&s.release).unwrap(), expected);
     }
 
     #[test]
@@ -1053,5 +1109,583 @@ targets = ["wasm32v1-none"]
         assert_eq!(format_unix(86_400), "1970-01-02T00:00:00Z");
         assert_eq!(format_unix(1_700_000_000), "2023-11-14T22:13:20Z");
         assert_eq!(format_unix(1_893_456_000), "2030-01-01T00:00:00Z");
+    }
+
+    // -----------------------------------------------------------------------
+    // Digest and date primitives
+    // -----------------------------------------------------------------------
+
+    /// Everything else in this suite compares a digest produced by
+    /// `sha256_hex` against another one produced by `sha256_hex`, so without a
+    /// known-answer test a switch to a different algorithm would stay green
+    /// while silently breaking `sha256sum -c SHASUMS` and the recorded digests.
+    #[test]
+    fn sha256_hex_matches_published_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex(b"abc").len(), 64);
+    }
+
+    #[test]
+    fn civil_from_days_handles_epoch_leap_days_and_pre_epoch_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+        assert_eq!(civil_from_days(-719_468), (0, 3, 1));
+        assert_eq!(civil_from_days(11_016), (2000, 2, 29));
+        assert_eq!(civil_from_days(11_017), (2000, 3, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+    }
+
+    #[test]
+    fn now_rfc3339_is_a_fixed_width_utc_timestamp_for_the_current_second() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let stamp = now_rfc3339();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        assert_eq!(stamp.len(), "1970-01-01T00:00:00Z".len());
+        assert_eq!(&stamp[4..5], "-");
+        assert_eq!(&stamp[10..11], "T");
+        assert!(stamp.ends_with('Z'));
+        assert!(
+            (before..=after).any(|secs| format_unix(secs) == stamp),
+            "{stamp} is not a timestamp between {before} and {after}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error contract — every failure mode names what failed and where
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_display_names_the_failure_and_the_paths_involved() {
+        assert_eq!(
+            Error::ReleaseDirMissing(PathBuf::from("/out/release")).to_string(),
+            "release dir does not exist: /out/release"
+        );
+        assert_eq!(
+            Error::NotADirectory(PathBuf::from("/out/SHASUMS")).to_string(),
+            "release path is not a directory: /out/SHASUMS"
+        );
+        assert_eq!(
+            Error::NoWasmArtifacts(PathBuf::from("/out/release")).to_string(),
+            "no *.wasm artifacts found in /out/release"
+        );
+        assert_eq!(
+            Error::WorkspaceRootNotFound(PathBuf::from("/out/release")).to_string(),
+            "could not find a workspace Cargo.toml (with [workspace]) walking up from /out/release"
+        );
+        assert_eq!(
+            Error::SdkVersionNotFound.to_string(),
+            "soroban-sdk not found in Cargo.lock"
+        );
+        assert_eq!(
+            Error::ManifestMissing(PathBuf::from("/out/release/provenance.json")).to_string(),
+            "provenance manifest not found: /out/release/provenance.json"
+        );
+        assert_eq!(
+            Error::MissingArtifact {
+                name: "fluxora_stream.wasm".to_string(),
+            }
+            .to_string(),
+            "artifact listed in the manifest is missing from the release dir: fluxora_stream.wasm"
+        );
+        assert_eq!(
+            Error::UnlistedArtifact {
+                name: "fluxora_sneaky.wasm".to_string(),
+            }
+            .to_string(),
+            "artifact present in the release dir is not listed in the manifest: fluxora_sneaky.wasm \
+             (regenerate provenance so every contract is covered)"
+        );
+        assert_eq!(
+            Error::Io {
+                path: PathBuf::from("/out/release"),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "no such file"),
+            }
+            .to_string(),
+            "/out/release: no such file"
+        );
+        assert_eq!(
+            Error::Toml("expected `=`".to_string()).to_string(),
+            "TOML parse error: expected `=`"
+        );
+
+        // Both digests are reported, so a mismatch can be investigated straight
+        // from the log without re-running the tool.
+        let mismatch = Error::HashMismatch {
+            name: "fluxora_stream.wasm".to_string(),
+            expected: "aa".repeat(32),
+            actual: "bb".repeat(32),
+        }
+        .to_string();
+        assert!(mismatch.contains("sha256 mismatch for fluxora_stream.wasm"));
+        assert!(mismatch.contains(&"aa".repeat(32)));
+        assert!(mismatch.contains(&"bb".repeat(32)));
+
+        // ... and a drift reports the field plus the recorded and current value.
+        assert_eq!(
+            Error::MetadataMismatch {
+                field: "soroban_sdk",
+                recorded: "27.0.5".to_string(),
+                actual: "27.0.6".to_string(),
+            }
+            .to_string(),
+            "soroban_sdk drifted since provenance was generated: manifest 27.0.5 != current 27.0.6"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // list_wasm_files boundaries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_wasm_files_sorts_and_ignores_everything_that_is_not_a_wasm_file() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "zeta.wasm", b"z");
+        write_wasm(&s.release, "alpha.wasm", b"a");
+        fs::write(s.release.join("NOTES.md"), b"notes").unwrap();
+        fs::write(s.release.join("fluxora_stream.wasm.bak"), b"backup").unwrap();
+        // Nested entries and directory-shaped entries are not artifacts: only
+        // files directly inside the release dir are hashed.
+        fs::create_dir_all(s.release.join("nested")).unwrap();
+        write_wasm(&s.release.join("nested"), "deep.wasm", b"d");
+        fs::create_dir_all(s.release.join("dir.wasm")).unwrap();
+
+        let names: Vec<String> = list_wasm_files(&s.release)
+            .unwrap()
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["alpha.wasm", "zeta.wasm"]);
+    }
+
+    #[test]
+    fn list_wasm_files_reports_an_unreadable_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-dir");
+        match list_wasm_files(&missing) {
+            Err(Error::Io { path, .. }) => assert_eq!(path, missing),
+            other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_rejects_a_release_dir_with_no_wasm_files_even_when_it_holds_other_files() {
+        let s = scratch_repo();
+        fs::write(s.release.join(SHASUMS_FILENAME), b"stale digests").unwrap();
+        fs::write(s.release.join("fluxora_stream.wasm.bak"), b"backup").unwrap();
+
+        match generate(&s.release, None, None, DEFAULT_TARGET) {
+            Err(Error::NoWasmArtifacts(p)) => assert_eq!(p, s.release),
+            other => panic!("expected NoWasmArtifacts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_and_verify_reject_a_release_path_that_is_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("fluxora_stream.wasm");
+        fs::write(&file, sample_wasm()).unwrap();
+
+        match generate(&file, None, None, DEFAULT_TARGET) {
+            Err(Error::NotADirectory(p)) => assert_eq!(p, file),
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
+        match verify(&file, None, None, DEFAULT_TARGET) {
+            Err(Error::NotADirectory(p)) => assert_eq!(p, file),
+            other => panic!("expected NotADirectory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn generate_and_verify_reject_a_missing_release_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-release");
+
+        match generate(&missing, None, None, DEFAULT_TARGET) {
+            Err(Error::ReleaseDirMissing(p)) => assert_eq!(p, missing),
+            other => panic!("expected ReleaseDirMissing, got {other:?}"),
+        }
+        match verify(&missing, None, None, DEFAULT_TARGET) {
+            Err(Error::ReleaseDirMissing(p)) => assert_eq!(p, missing),
+            other => panic!("expected ReleaseDirMissing, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // generate / verify argument overrides
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_and_verify_honor_an_explicit_manifest_path() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        let manifest_path = s.root.join("provenance").join("release.json");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+
+        generate(&s.release, Some(&manifest_path), None, DEFAULT_TARGET).unwrap();
+
+        assert!(manifest_path.is_file());
+        assert!(!s.release.join(MANIFEST_FILENAME).exists());
+        // SHASUMS is always written next to the artifacts, whatever the
+        // manifest override is.
+        assert!(s.release.join(SHASUMS_FILENAME).is_file());
+
+        assert_eq!(
+            verify(&s.release, Some(&manifest_path), None, DEFAULT_TARGET).unwrap(),
+            1
+        );
+        // Without the override, verify looks at <release-dir>/provenance.json.
+        match verify(&s.release, None, None, DEFAULT_TARGET) {
+            Err(Error::ManifestMissing(p)) => {
+                assert_eq!(p, s.release.join(MANIFEST_FILENAME));
+            }
+            other => panic!("expected ManifestMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_workspace_root_is_used_for_a_detached_release_dir() {
+        let (_tmp, root, release) = detached_release();
+        write_wasm(&release, "fluxora_stream.wasm", &sample_wasm());
+
+        // Discovery alone cannot find a workspace above this release dir ...
+        match find_workspace_root(&release) {
+            Err(Error::WorkspaceRootNotFound(p)) => assert_eq!(p, release),
+            other => panic!("expected WorkspaceRootNotFound, got {other:?}"),
+        }
+        // ... and `generate` without the override fails the same way ...
+        assert!(matches!(
+            generate(&release, None, None, DEFAULT_TARGET),
+            Err(Error::WorkspaceRootNotFound(_))
+        ));
+
+        // ... while the explicit root records the checkout it was told about.
+        let manifest = generate(&release, None, Some(&root), DEFAULT_TARGET).unwrap();
+        assert_eq!(manifest.build.git_revision, head_revision(&root));
+        assert_eq!(
+            verify(&release, None, Some(&root), DEFAULT_TARGET).unwrap(),
+            1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Build-input discovery failures
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn collect_metadata_reports_a_lock_without_a_soroban_sdk_entry() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        fs::write(
+            s.root.join("Cargo.lock"),
+            "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            generate(&s.release, None, None, DEFAULT_TARGET),
+            Err(Error::SdkVersionNotFound)
+        ));
+
+        // A lock with no `[[package]]` array at all is the same failure.
+        fs::write(s.root.join("Cargo.lock"), "[metadata]\n").unwrap();
+        assert!(matches!(
+            generate(&s.release, None, None, DEFAULT_TARGET),
+            Err(Error::SdkVersionNotFound)
+        ));
+    }
+
+    #[test]
+    fn collect_metadata_reports_an_unparseable_workspace_manifest() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        fs::write(s.root.join("Cargo.toml"), "[[[").unwrap();
+
+        // The root is passed explicitly: an unparseable `Cargo.toml` is skipped
+        // by discovery (it cannot be shown to declare `[workspace]`), so the
+        // parse failure only surfaces when the root is known.
+        assert!(matches!(
+            generate(&s.release, None, Some(&s.root), DEFAULT_TARGET),
+            Err(Error::Toml(_))
+        ));
+        assert!(matches!(
+            find_workspace_root(&s.release),
+            Err(Error::WorkspaceRootNotFound(_))
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Environment drift — every recorded build input is checked
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn an_absent_toolchain_pin_is_recorded_as_none_and_still_verifies() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        fs::remove_file(s.root.join("rust-toolchain.toml")).unwrap();
+
+        let manifest = generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+        assert!(manifest.build.toolchain_channel.is_none());
+        // Both sides render the absent pin as `<none>`, so verify stays green.
+        assert_eq!(verify(&s.release, None, None, DEFAULT_TARGET).unwrap(), 1);
+    }
+
+    #[test]
+    fn verify_rejects_a_drifted_toolchain_pin() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        fs::write(
+            s.root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"1.98.0\"\n",
+        )
+        .unwrap();
+
+        match verify(&s.release, None, None, DEFAULT_TARGET) {
+            Err(Error::MetadataMismatch {
+                field,
+                recorded,
+                actual,
+            }) => {
+                assert_eq!(field, "toolchain_channel");
+                assert_eq!(recorded, "1.97.1");
+                assert_eq!(actual, "1.98.0");
+            }
+            other => panic!("expected toolchain_channel MetadataMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_removed_toolchain_pin() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        fs::remove_file(s.root.join("rust-toolchain.toml")).unwrap();
+
+        match verify(&s.release, None, None, DEFAULT_TARGET) {
+            Err(Error::MetadataMismatch {
+                field,
+                recorded,
+                actual,
+            }) => {
+                assert_eq!(field, "toolchain_channel");
+                assert_eq!(recorded, "1.97.1");
+                assert_eq!(actual, "<none>");
+            }
+            other => panic!("expected toolchain_channel MetadataMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_drifted_target() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        match verify(&s.release, None, None, "wasm32-unknown-unknown") {
+            Err(Error::MetadataMismatch {
+                field,
+                recorded,
+                actual,
+            }) => {
+                assert_eq!(field, "target");
+                assert_eq!(recorded, DEFAULT_TARGET);
+                assert_eq!(actual, "wasm32-unknown-unknown");
+            }
+            other => panic!("expected target MetadataMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_drifted_soroban_sdk_version() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        fs::write(
+            s.root.join("Cargo.lock"),
+            "[[package]]\nname = \"soroban-sdk\"\nversion = \"27.0.6\"\n",
+        )
+        .unwrap();
+
+        match verify(&s.release, None, None, DEFAULT_TARGET) {
+            Err(Error::MetadataMismatch {
+                field,
+                recorded,
+                actual,
+            }) => {
+                assert_eq!(field, "soroban_sdk");
+                assert_eq!(recorded, "27.0.5");
+                assert_eq!(actual, "27.0.6");
+            }
+            other => panic!("expected soroban_sdk MetadataMismatch, got {other:?}"),
+        }
+    }
+
+    /// `rustc` and `cargo` come from the toolchain that is actually installed,
+    /// so they are pinned by rewriting the recorded manifest the way a
+    /// different builder's manifest would look.
+    #[test]
+    fn verify_rejects_a_drifted_compiler_identity() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        let path = s.release.join(MANIFEST_FILENAME);
+        for field in ["rustc", "cargo"] {
+            // Regenerate each round so only the field under test has drifted.
+            generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+            let recorded = "0.0.0 (built elsewhere)".to_string();
+            let mut manifest = read_manifest(&path);
+            if field == "rustc" {
+                manifest.build.rustc = recorded.clone();
+            } else {
+                manifest.build.cargo = recorded.clone();
+            }
+            fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+
+            match verify(&s.release, None, None, DEFAULT_TARGET) {
+                Err(Error::MetadataMismatch {
+                    field: drifted,
+                    recorded: reported,
+                    actual,
+                }) => {
+                    assert_eq!(drifted, field);
+                    assert_eq!(reported, recorded);
+                    assert_ne!(actual, recorded);
+                }
+                other => panic!("expected {field} MetadataMismatch, got {other:?}"),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Idempotence, recovery and the files the tool owns
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn generate_overwrites_the_previous_manifest_so_a_rebuild_can_be_reverified() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        // Tamper -> the gate must fail ...
+        write_wasm(&s.release, "fluxora_stream.wasm", b"\x00asm rebuilt bytes");
+        assert!(matches!(
+            verify(&s.release, None, None, DEFAULT_TARGET),
+            Err(Error::HashMismatch { .. })
+        ));
+
+        // ... and regenerating after the rebuild is the recovery path.
+        let manifest = generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+        assert_eq!(
+            manifest.subject[0].sha256,
+            sha256_hex(b"\x00asm rebuilt bytes")
+        );
+        assert_eq!(verify(&s.release, None, None, DEFAULT_TARGET).unwrap(), 1);
+
+        // A newly added artifact is caught, then covered by regenerating.
+        write_wasm(&s.release, "fluxora_archival_probe.wasm", b"\x00asm probe");
+        assert!(matches!(
+            verify(&s.release, None, None, DEFAULT_TARGET),
+            Err(Error::UnlistedArtifact { .. })
+        ));
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+        assert_eq!(verify(&s.release, None, None, DEFAULT_TARGET).unwrap(), 2);
+    }
+
+    #[test]
+    fn generate_and_verify_leave_no_temp_files_behind() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        // The atomic write renames its temp file into place, so the release dir
+        // holds exactly the artifact, the manifest and SHASUMS.
+        let mut names: Vec<String> = fs::read_dir(&s.release)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                SHASUMS_FILENAME.to_string(),
+                "fluxora_stream.wasm".to_string(),
+                MANIFEST_FILENAME.to_string(),
+            ]
+        );
+
+        // `verify` never writes anything: both files must be byte-identical
+        // afterwards.
+        let shasums = fs::read_to_string(s.release.join(SHASUMS_FILENAME)).unwrap();
+        let manifest = fs::read_to_string(s.release.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(verify(&s.release, None, None, DEFAULT_TARGET).unwrap(), 1);
+        assert_eq!(
+            fs::read_to_string(s.release.join(SHASUMS_FILENAME)).unwrap(),
+            shasums
+        );
+        assert_eq!(
+            fs::read_to_string(s.release.join(MANIFEST_FILENAME)).unwrap(),
+            manifest
+        );
+    }
+
+    #[test]
+    fn shasums_lists_every_artifact_once_in_sorted_order() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        write_wasm(
+            &s.release,
+            "fluxora_archival_probe.wasm",
+            b"\x00asm probe bytes",
+        );
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        let shasums = fs::read_to_string(s.release.join(SHASUMS_FILENAME)).unwrap();
+        assert_eq!(
+            shasums,
+            format!(
+                "{probe}  fluxora_archival_probe.wasm\n{stream}  fluxora_stream.wasm\n",
+                probe = sha256_hex(b"\x00asm probe bytes"),
+                stream = sha256_hex(&sample_wasm()),
+            )
+        );
+        // Two lines in `sha256sum` format, so `sha256sum -c SHASUMS` consumes it.
+        assert_eq!(shasums.lines().count(), 2);
+        for line in shasums.lines() {
+            let (hash, name) = line.split_once("  ").expect("sha256sum format");
+            assert_eq!(hash.len(), 64);
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(name.ends_with(".wasm"));
+        }
+    }
+
+    #[test]
+    fn verify_ignores_files_that_are_not_wasm_artifacts() {
+        let s = scratch_repo();
+        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+        generate(&s.release, None, None, DEFAULT_TARGET).unwrap();
+
+        fs::write(s.release.join("README.txt"), b"notes").unwrap();
+        fs::create_dir_all(s.release.join("nested")).unwrap();
+        write_wasm(&s.release.join("nested"), "ignored.wasm", b"nested");
+
+        assert_eq!(verify(&s.release, None, None, DEFAULT_TARGET).unwrap(), 1);
     }
 }

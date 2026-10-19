@@ -1,0 +1,76 @@
+{
+  "event": "StreamCreated",
+  "topic": "stream_created",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "sender",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "recipient",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "token",
+      "type": "Address",
+      "topic": false
+    },
+    {
+      "name": "deposited",
+      "type": "i128",
+      "topic": false
+    },
+    {
+      "name": "start_time",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "end_time",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "cliff_time",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "cancellable",
+      "type": "bool",
+      "topic": false
+    },
+    {
+      "name": "pausable",
+      "type": "bool",
+      "topic": false
+    },
+    {
+      "name": "transferable",
+      "type": "bool",
+      "topic": false
+    },
+    {
+      "name": "curve",
+      "type": "ReleaseCurve",
+      "topic": false
+    },
+    {
+      "name": "cliff_mode",
+      "type": "CliffMode",
+      "topic": false
+    },
+    {
+      "name": "reference",
+      "type": "Option<String>",
+      "topic": false
+    }
+  ]
+}

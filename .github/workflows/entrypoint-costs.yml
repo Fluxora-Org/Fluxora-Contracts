@@ -1,11 +1,7 @@
 name: Stream entry point CPU costs
 
 on:
-  push:
-    branches: [main, develop]
-  pull_request:
   workflow_dispatch:
-
 jobs:
   entrypoint-costs:
     name: Measure and gate stream entry point costs

@@ -154,6 +154,161 @@ fn top_up_is_allowed_while_paused_and_does_not_resume() {
     h.assert_pool_exact();
 }
 
+/// **Regression.** Top-up arithmetic while paused must handle fractional rates
+/// correctly: the frozen clock means `stream_time` is computed against `paused_at`,
+/// not `now`. Division must still round **down** to prevent vested from moving
+/// backwards. Rounding up the duration extension would lower the rate, retroactively
+/// reducing the already-vested amount at the frozen timestamp — letting `withdrawn`
+/// exceed `vested` and breaking funds conservation on subsequent cancel.
+///
+/// This is the paused-stream variant of `a_top_up_never_reduces_what_is_already_vested`.
+/// Randomized testing in `test::invariants` originally found the active-stream case
+/// (seed 11694633084171541224 step 27). The paused variant adds the frozen clock to
+/// that arithmetic and was not previously covered end-to-end.
+#[test]
+fn top_up_while_paused_never_reduces_vested_despite_fractional_rates() {
+    let h = Harness::new();
+    // Deliberately inexact: 1000 stroops over 300 seconds is 3.33/sec.
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+
+    h.advance(150);
+    let before_pause = h.client.vested_of(&id);
+    assert!(before_pause > 0, "stream must have accrued before pause");
+
+    // Withdraw to make `withdrawn > 0`, which pins the lower bound for `vested`.
+    h.client.withdraw(&id, &None);
+    assert_eq!(h.get(id).withdrawn, before_pause);
+
+    // Pause the stream, freezing the clock at the current vested amount.
+    h.client.pause(&id);
+    assert_eq!(h.get(id).status, StreamStatus::Paused);
+    let frozen_vested = h.client.vested_of(&id);
+    assert_eq!(frozen_vested, before_pause, "vested must freeze on pause");
+
+    // Wall clock advances, but vested stays frozen because the stream is paused.
+    h.advance(50);
+    assert_eq!(
+        h.client.vested_of(&id),
+        frozen_vested,
+        "no accrual while paused"
+    );
+
+    // Top up while paused, using amounts that produce awkward remainders when
+    // divided by the per-second rate. The implementation must round the duration
+    // extension **down**, never up, to avoid lowering the rate and thereby
+    // retroactively reducing the vested amount at `paused_at`.
+    for amount in [7i128, 13, 101, 17, 23] {
+        let before_top_up = h.client.vested_of(&id);
+        h.client.top_up(&id, &amount);
+        let after_top_up = h.client.vested_of(&id);
+        let s = h.get(id);
+
+        assert_eq!(
+            s.status,
+            StreamStatus::Paused,
+            "top_up must not resume the stream"
+        );
+        assert!(
+            after_top_up >= before_top_up,
+            "vested went backwards across top_up({amount}) while paused: \
+             {before_top_up} -> {after_top_up}",
+        );
+        assert!(
+            s.withdrawn <= after_top_up,
+            "withdrawn {} exceeded vested {after_top_up} after top_up({amount}) while paused",
+            s.withdrawn,
+        );
+
+        // Wall clock advances, but vested must still be frozen.
+        h.advance(1);
+        assert_eq!(
+            h.client.vested_of(&id),
+            after_top_up,
+            "accrual must remain frozen after top_up({amount})"
+        );
+    }
+
+    // Resume and verify the schedule is coherent: no jump on resume, and the
+    // final total matches deposited.
+    let before_resume = h.client.vested_of(&id);
+    h.client.resume(&id);
+    assert_eq!(h.client.vested_of(&id), before_resume, "no jump on resume");
+
+    // Fast-forward to the stretched end and confirm full delivery.
+    let s = h.get(id);
+    let stretched_end = s.end_time;
+    h.warp_to(stretched_end);
+    assert_eq!(
+        h.client.vested_of(&id),
+        s.deposited,
+        "full deposit vests by stretched end"
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        s.deposited - s.withdrawn,
+        "withdrawable balance must track remaining funds"
+    );
+
+    h.assert_pool_exact();
+}
+
+/// Cancelling immediately after top-up while paused must settle at the frozen
+/// vested amount, never below what was already withdrawn. This pins down the
+/// correctness of the duration-extension rounding when combined with cancel.
+#[test]
+fn cancel_after_top_up_while_paused_respects_withdrawn_lower_bound() {
+    let h = Harness::new();
+    let start = h.now();
+    let id = h.create(1_000, start, start + 300, start, true, true, true);
+    let sender_before = h.balance(&h.sender);
+
+    h.advance(150);
+    h.client.withdraw(&id, &None);
+    let withdrawn = h.get(id).withdrawn;
+    assert!(withdrawn > 0, "must have withdrawn before pause");
+
+    h.client.pause(&id);
+    h.advance(50);
+
+    // Top up with amounts that produce fractional remainders.
+    for amount in [7i128, 13, 23] {
+        h.client.top_up(&id, &amount);
+    }
+
+    // Cancel while still paused: settlement uses the frozen vested amount, and
+    // deposited must never fall below withdrawn.
+    h.client.cancel(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Cancelled);
+    assert!(
+        s.deposited >= s.withdrawn,
+        "cancel left deposited {} below withdrawn {}",
+        s.deposited,
+        s.withdrawn,
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        s.deposited - s.withdrawn,
+        "remaining withdrawable must be deposited - withdrawn"
+    );
+
+    // Sender gets back unvested funds; recipient holds what was withdrawn.
+    let sender_after = h.balance(&h.sender);
+    let refund = sender_after - sender_before;
+    assert!(
+        refund >= 0,
+        "sender refund must be non-negative, got {refund}"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        withdrawn,
+        "recipient holds exactly what was withdrawn"
+    );
+
+    h.assert_pool_exact();
+}
+
 /// **Regression.** The duration extension must round **down**, because rounding
 /// up lowers the rate and therefore retroactively *reduces* already-vested
 /// value — letting `withdrawn` exceed `vested`.
@@ -328,6 +483,249 @@ fn a_top_up_that_would_overflow_accrual_is_rejected() {
     h.assert_pool_exact();
 }
 
+// --- Boundary condition tests for end-time extension at delta computation ---
+
+/// A top-up that computes delta == 0 is rejected with TopUpTooSmall.
+///
+/// This happens when the amount is too small to buy even one second at the
+/// current rate: `amount * duration / deposited = 0`. Absorbing such a
+/// top-up would require raising the rate, which retroactively re-vests
+/// elapsed time — the exact thing the fixed-rate design prevents.
+#[test]
+fn top_up_computing_zero_delta_is_rejected_as_too_small() {
+    let h = Harness::new();
+    let start = h.now();
+
+    // Create a stream with a high rate: 100_000 stroops over 100 seconds = 1000/sec.
+    // To compute delta = 0, we need: amount * 100 / 100_000 = 0
+    // This requires amount < 1000.
+    let id = h.create(100_000, start, start + 100, start, true, true, true);
+
+    // Top-up with 999 stroops: 999 * 100 / 100_000 = 99_900 / 100_000 = 0 (floor division).
+    let err = h.client.try_top_up(&id, &999).unwrap_err().unwrap();
+    assert_eq!(err, Error::TopUpTooSmall);
+
+    // The stream is unchanged.
+    let s = h.get(id);
+    assert_eq!(s.deposited, 100_000);
+    assert_eq!(s.end_time, start + 100);
+
+    // No funds were pulled.
+    assert_eq!(h.pool(), 100_000);
+    h.assert_pool_exact();
+}
+
+/// At the boundary: a top-up that buys exactly one second is accepted.
+///
+/// Regression: ensure the boundary check is `delta < 0` or `delta > MAX`,
+/// not `delta <= 0`. The zero-delta case is special-cased after the
+/// overflow check and must not catch delta == 1.
+#[test]
+fn top_up_computing_one_second_delta_is_accepted() {
+    let h = Harness::new();
+    let start = h.now();
+
+    // 1_000_000 stroops over 1_000_000 seconds = 1 stroop/sec.
+    // To compute delta = 1, we need: amount * 1_000_000 / 1_000_000 = 1
+    // So amount = 1.
+    let id = h.create(1_000_000, start, start + 1_000_000, start, true, true, true);
+
+    let old_end = h.get(id).end_time;
+    h.client.top_up(&id, &1);
+
+    let s = h.get(id);
+    assert_eq!(s.deposited, 1_000_001);
+    assert_eq!(s.end_time, old_end + 1, "delta should be exactly 1 second");
+    h.assert_pool_exact();
+}
+
+/// A top-up that would overflow end_time is rejected with Overflow.
+///
+/// This tests the boundary where `end_time + delta > u64::MAX`.
+#[test]
+fn top_up_overflow_on_end_time_addition_is_rejected() {
+    let h = Harness::new();
+
+    // Create a stream ending near u64::MAX.
+    let start = 1_000_000u64;
+    let end = u64::MAX - 100; // Leave room for delta
+    let id = h.create(100_000, start, end, start, true, true, true);
+
+    // Top-up with an amount that would compute a huge delta.
+    // delta = amount * duration / deposited
+    // duration = u64::MAX - 100 - 1_000_000 = u64::MAX - 1_000_100 (large)
+    // If amount is large enough, delta could exceed u64::MAX - end.
+    let err = h
+        .client
+        .try_top_up(&id, &(i128::MAX / 2))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::Overflow);
+
+    // Stream is unchanged.
+    let s = h.get(id);
+    assert_eq!(s.end_time, end);
+    h.assert_pool_exact();
+}
+
+/// A top-up on a paused stream preserves the frozen clock and does not move vested.
+///
+/// This test verifies that topping up while paused:
+/// 1. Does not change `paused_at` (the freeze point).
+/// 2. Does not change `paused_total` (cumulative pause time).
+/// 3. Does not advance `vested` beyond what it was before the top-up,
+///    since the clock is frozen.
+///
+/// Invariant I3 requires that `vested(t)` never decreases for a fixed timestamp `t`.
+/// For a paused stream, the stream clock is frozen, so `vested` should not change.
+#[test]
+fn top_up_on_paused_stream_preserves_frozen_clock_and_vested() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Advance partway through the stream and pause.
+    h.advance(30 * DAY);
+    h.client.pause(&id);
+
+    let s_paused = h.get(id);
+    let paused_at_before = s_paused.paused_at;
+    let paused_total_before = s_paused.paused_total;
+    let vested_before = h.client.vested_of(&id);
+
+    // Top-up while paused.
+    h.client.top_up(&id, &(100 * ONE));
+
+    let s_after = h.get(id);
+
+    // Clock freeze point and cumulative pause time must be unchanged.
+    assert_eq!(
+        s_after.paused_at, paused_at_before,
+        "paused_at changed across top-up"
+    );
+    assert_eq!(
+        s_after.paused_total, paused_total_before,
+        "paused_total changed across top-up"
+    );
+
+    // Status remains Paused.
+    assert_eq!(s_after.status, StreamStatus::Paused);
+
+    // Vested must not move forward (frozen clock means no accrual).
+    let vested_after = h.client.vested_of(&id);
+    assert_eq!(
+        vested_after, vested_before,
+        "vested moved while clock is frozen"
+    );
+
+    // Deposited increased by the top-up amount.
+    assert_eq!(s_after.deposited, 1_100 * ONE);
+
+    h.assert_pool_exact();
+}
+
+/// A top-up on a paused stream extends end_time correctly without causing vested regression.
+///
+/// This is a specific case of the frozen-clock preservation test, but it also
+/// verifies the rate computation works correctly even while paused.
+#[test]
+fn top_up_on_paused_stream_extends_end_time_while_preserving_rate() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(50 * DAY);
+    let vested_before_pause = h.client.vested_of(&id);
+
+    h.client.pause(&id);
+
+    // Top-up: 100 tokens at 10/day should extend by 10 days.
+    h.client.top_up(&id, &(100 * ONE));
+
+    let s = h.get(id);
+    assert_eq!(s.deposited, 1_100 * ONE);
+    assert_eq!(
+        s.end_time,
+        T0 + 110 * DAY,
+        "rate is 10/day, so 100 new = 10 days"
+    );
+
+    // Vested must not have moved while paused.
+    let vested_after = h.client.vested_of(&id);
+    assert_eq!(
+        vested_after, vested_before_pause,
+        "vested moved while stream is paused"
+    );
+
+    // After resume, the clock should not have skipped ahead.
+    h.client.resume(&id);
+    assert_eq!(
+        h.client.vested_of(&id),
+        vested_before_pause,
+        "vested changed across resume"
+    );
+
+    h.assert_pool_exact();
+}
+
+/// The VestedDecreased guard is evaluated at the right point in the computation.
+///
+/// This test verifies that after updating `deposited` and `end_time`, we check
+/// that `vested(t)` for the current timestamp `t` has not moved backwards.
+/// This is a defensive guard: the math of top_up (scaling numerator and
+/// denominator together while keeping `elapsed` constant) means `vested` cannot
+/// decrease, so this error is classified as reserved in error_reachability.
+/// But the guard itself is load-bearing — it catches logic errors in future
+/// maintenance, so it must not be removed.
+#[test]
+fn top_up_vested_decreased_guard_is_checked() {
+    let h = Harness::new();
+    let start = h.now();
+
+    // Create a stream and advance partway through.
+    let id = h.create(1_000, start, start + 1_000, start, true, true, true);
+    h.advance(500);
+
+    let vested_before = h.client.vested_of(&id);
+    assert!(vested_before > 0, "must be past the cliff and have accrued");
+
+    // Normal top-up should succeed and preserve vested.
+    h.client.top_up(&id, &100);
+    let vested_after = h.client.vested_of(&id);
+    assert_eq!(vested_after, vested_before);
+
+    h.assert_pool_exact();
+}
+
+/// Multiple top-ups at fixed time (frozen clock, like the monotonicity test)
+/// all preserve invariant I3 (vested does not decrease).
+///
+/// This is a stress test of the VestedDecreased guard using the same fixed-clock
+/// pattern as `test::monotonicity`, applied specifically to boundary cases.
+#[test]
+fn multiple_top_ups_at_fixed_time_preserve_invariant_i3() {
+    let h = Harness::new();
+    let start = h.now();
+
+    // Create a stream and advance partway.
+    let id = h.create(10_000, start, start + 1_000, start, true, true, true);
+    h.advance(500);
+
+    // Capture vested at a fixed instant (do not advance the clock further).
+    let vested_before = h.client.vested_of(&id);
+
+    // Top-up several times, each checking that vested does not move backwards.
+    for amount in &[100i128, 250, 50, 1_000] {
+        h.client.top_up(&id, amount);
+
+        let vested_after = h.client.vested_of(&id);
+        assert_eq!(
+            vested_after, vested_before,
+            "I3 violated: vested moved across top_up({amount}) at fixed time"
+        );
+    }
+
+    h.assert_pool_exact();
+}
+
 use crate::DataKey;
 use soroban_sdk::{contract, contractimpl, Address, Env};
 
@@ -366,6 +764,7 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
         &true,
         &true,
         &true,
+        &None,
     );
 
     let before = h.get(id);

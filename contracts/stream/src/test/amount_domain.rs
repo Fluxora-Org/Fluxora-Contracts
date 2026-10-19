@@ -30,6 +30,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -49,6 +50,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -68,6 +70,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -87,6 +90,7 @@ fn create_stream_rejects_zero_negative_and_handles_extremes() {
         &true,
         &true,
         &true,
+        &None,
     );
     if let Err(Ok(e)) = res {
         assert!(

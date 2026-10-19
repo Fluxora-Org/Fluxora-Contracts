@@ -100,6 +100,8 @@ fn assert_cancel_settlement(
         vested: stream.deposited,
         withdrawn: stream.withdrawn,
         end_time: stream.end_time,
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
     };
     assert_eq!(
         published,

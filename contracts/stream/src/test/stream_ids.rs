@@ -95,6 +95,7 @@ fn attempt_self_stream_rejection(h: &Harness) {
             &true,
             &true,
             &true,
+            &None,
         )
         .unwrap_err()
         .unwrap();
@@ -119,6 +120,7 @@ fn attempt_unaffordable_deposit_rejection(h: &Harness) {
         &true,
         &true,
         &true,
+        &None,
     );
     assert!(
         result.is_err(),
@@ -200,6 +202,7 @@ fn validation_failures_never_consume_an_id() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -220,6 +223,7 @@ fn validation_failures_never_consume_an_id() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -240,6 +244,7 @@ fn validation_failures_never_consume_an_id() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -260,6 +265,7 @@ fn validation_failures_never_consume_an_id() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),
@@ -280,6 +286,7 @@ fn validation_failures_never_consume_an_id() {
                 &true,
                 &true,
                 &true,
+                &None,
             )
             .unwrap_err()
             .unwrap(),

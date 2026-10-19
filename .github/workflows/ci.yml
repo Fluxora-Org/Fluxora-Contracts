@@ -10,6 +10,7 @@ on:
     # Nightly deep fuzz. The randomized suites have found two real bugs
     # (depleted-while-paused, and top_up rounding driving vested backwards),
     # so they get a budget that a per-PR run cannot afford.
+    
     - cron: "0 3 * * *"
   workflow_dispatch:
     inputs:
@@ -32,8 +33,13 @@ jobs:
     name: Python Tooling Tests and Docs Alignment
     runs-on: ubuntu-latest
     steps:
+      # Full history so tests/test_validator.py can compare
+      # script/doc-alignment-baseline.json against the base branch and fail
+      # if the shrink-only baseline grew.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Bumped 3.10 → 3.11: `script/verify_rust_version.py` (and a couple
       # of other helpers) prefer `tomllib` when available; on 3.10 it
@@ -63,6 +69,9 @@ jobs:
       - name: Clear Python bytecode cache
         run: find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
+      - name: Verify Soroban SDK version records
+        run: python3 script/verify_soroban_version.py
+
       - name: Run test suite with coverage
         run: >-
           pytest tests/ --cov=script/ --cov-fail-under=50
@@ -78,8 +87,18 @@ jobs:
           path: coverage/python-tooling.xml
           if-no-files-found: warn
 
-      - name: Validate doc alignment (streaming / events / errors)
-        run: echo "Skip missing python script"
+      # Blocking gate (issue #1865): docs/ABI.md must cover every public
+      # #[contractimpl] entry point in lib.rs (missing-from-docs fails) and
+      # must not document entry points that no longer exist in the contract
+      # (documented-but-nonexistent fails). Known gaps predating the gate are
+      # recorded in script/doc-alignment-baseline.json with a reason; the
+      # baseline is a shrink-only ratchet: unbaselined gaps fail, stale
+      # baseline entries fail, and the file itself is routed to the
+      # maintainers team in .github/CODEOWNERS so it cannot grow silently.
+      # Exit 1 = misalignment, exit 2 = broken inputs (missing files,
+      # unparsable baseline). Both fail the job.
+      - name: Validate doc alignment (docs/ABI.md vs lib.rs entry points)
+        run: python3 script/validate-doc-alignment.py
 
       # Hard gate: diff the #[contractimpl] pub fn surface against
       # docs/audit.md's entrypoint table.  Fails (exit 1) if any ABI
@@ -122,8 +141,30 @@ jobs:
           print("OK: docs/audit.md entrypoint table is complete.")
           EOF
 
+      # Hard gate (issue #1692): contracts/stream/abi/fluxora_stream.json must
+      # list every public #[contractimpl] entry point in lib.rs, and every
+      # function in the JSON must be documented in docs/ABI.md.
+      # Exit 1 = drift detected (fail the build); exit 2 = bad inputs.
+      # To regenerate the committed file: python3 script/check-abi-drift.py --regenerate
+      - name: ABI drift check (JSON vs lib.rs vs docs/ABI.md)
+        run: python3 script/check-abi-drift.py
+
       - name: Migration path validation (docs/MIGRATION.md vs ABI)
         run: python3 script/validate_migration.py
+
+      # Hard gate (issue #1701): every #[contractevent] struct in
+      # contracts/stream/src/events.rs must have a schema fixture under
+      # tests/fixtures/event_snapshots/events/, and each fixture must match the
+      # parsed payload shape. A new event shipped without a fixture, or an
+      # event whose payload fields changed without regenerating its fixture,
+      # fails here. See docs/event-snapshots.md.
+      #
+      # `if: always()` keeps the verdict visible: an earlier step in this job
+      # can fail for reasons that have nothing to do with event fixtures, and
+      # without it this gate would be skipped rather than reported.
+      - name: Event snapshot coverage gate
+        if: always()
+        run: python3 script/check_event_snapshots.py
 
   # ---------------------------------------------------------------------------
   # Fast changed-files lint (PRs only).  Mirrors what developers run locally
@@ -369,6 +410,14 @@ jobs:
       - name: Build release artifacts (product only)
         run: script/release.sh
 
+      # Issue #1871: keep the real release and dry-run paths in lockstep on
+      # every pull request. These checks are local-only and need no secrets.
+      - name: Validate release dry-run parity and regression suite
+        run: bash script/test-release-dry-run.sh
+
+      - name: Run release dry-run (local validation)
+        run: script/release-dry-run.sh --local-only --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+
       - name: Verify Rust toolchain version
         if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
         run: python3 script/verify_rust_version.py
@@ -421,6 +470,9 @@ jobs:
           echo "provenance:"
           cat target/wasm32v1-none/release/provenance.json
 
+      # The release inventory contains only fluxora_stream.wasm. Build that
+      # deployable artifact twice into isolated target directories and compare
+      # both the raw and optimizer-produced bytes before deployment packaging.
       - name: Install Stellar CLI (pinned)
         run: |
           set -euo pipefail
@@ -434,9 +486,27 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           stellar --version
 
+      - name: Verify deployable WASM reproducibility
+        env:
+          FLUXORA_REQUIRE_OPTIMIZED: "true"
+        run: bash script/verify-wasm-checksum.sh --reproducible
+
       - name: Optimize WASM
         run: |
           stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_stream.wasm
+          test -s target/wasm32v1-none/release/fluxora_factory.wasm
+          stellar contract optimize --wasm target/wasm32v1-none/release/fluxora_factory.wasm
+
+      - name: Generate ABI from optimized WASM
+        run: script/generate_abi.sh
+
+      - name: Upload ABI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluxora-stream-abi
+          path: contracts/stream/abi/fluxora_abi.json
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Compute WASM SHA256 hash
         run: |
@@ -462,6 +532,14 @@ jobs:
 
       - name: Check WASM size budget
         run: bash script/check-stream-wasm-size.sh
+
+      - name: Check factory WASM size budget
+        run: |
+          FACTORY_WASM="target/wasm32v1-none/release/fluxora_factory.wasm"
+          test -s "$FACTORY_WASM"
+          SIZE=$(stat --printf='%s' "$FACTORY_WASM" 2>/dev/null || stat -f%z "$FACTORY_WASM")
+          echo "fluxora_factory.wasm: ${SIZE} bytes"
+          test "$SIZE" -le 300000
 
       - name: Upload WASM hash artifact
         uses: actions/upload-artifact@v4
@@ -533,6 +611,20 @@ jobs:
       # --nocapture surfaces the confirmation lines for each invariant.
       - name: Check package and artifact names (test suite)
         run: "cargo test --all-features packaging:: -- --nocapture --test-threads=1"
+
+      - name: Check factory package and artifact
+        run: |
+          meta=$(cargo metadata --format-version 1 --no-deps)
+          echo "$meta" | python3 -c '
+          import json, sys
+          packages = json.load(sys.stdin)["packages"]
+          factory = next((p for p in packages if p["name"] == "fluxora-factory"), None)
+          if factory is None:
+              raise SystemExit("fluxora-factory is missing from the workspace")
+          if not any("cdylib" in target["kind"] for target in factory["targets"]):
+              raise SystemExit("fluxora-factory has no cdylib target")
+          print("fluxora-factory package and cdylib target verified")
+          '
 
   fuzz-feature-matrix:
     name: feature matrix check
@@ -612,6 +704,14 @@ jobs:
         run: |
           cargo test -p fluxora-stream --features testutils \
             props:: \
+            -- --nocapture
+        env:
+          PROPTEST_CASES: "64"
+
+      - name: Bounded proptest pause/resume pass
+        run: |
+          cargo test -p fluxora-stream --features testutils \
+            pause::zero_elapsed_pause_resume_preserves_stream_state \
             -- --nocapture
         env:
           PROPTEST_CASES: "64"
@@ -734,7 +834,7 @@ jobs:
       # silent discriminant drift. See contracts/factory/tests/factory_error_discriminants.rs.
       - name: Factory discriminant-stability tests
         if: ${{ hashFiles('contracts/factory/Cargo.toml') != '' }}
-        run: cargo test -p fluxora_factory
+        run: cargo test -p fluxora-factory
 
       # Hard gate: cross-file collision audit. Parses all three discriminant
       # tables in docs/error.md and fails (exit 1) on any intra-section
@@ -865,26 +965,13 @@ jobs:
         if: steps.cache-tarpaulin.outputs.cache-hit != 'true'
         run: cargo install cargo-tarpaulin --version "^0.31" --locked
 
-      - name: Generate coverage report
-        run: |
-          # Default tarpaulin per-test timeout is 60s. Instrumented proptest
-          # suites in test_withdrawable_props exceed that and abort the job with
-          # "Timed out waiting for test response" (seen on PR coverage runs).
-          cargo tarpaulin \
-            --features testutils \
-            --out Xml \
-            --out Html \
-            --output-dir coverage \
-            --ignore-tests \
-            --skip-clean \
-            --timeout 300 \
-            -p fluxora-stream
+      - name: Measure coverage for every workspace crate
+        run: script/measure-coverage.sh coverage
 
-      - name: Enforce committed coverage floor
+      - name: Enforce committed per-crate coverage floors
         run: |
-          python3 script/check_stream_coverage.py \
-            --xml coverage/cobertura.xml \
-            --floor contracts/stream/coverage-floor.txt \
+          python3 script/check_coverage_floors.py \
+            --reports-dir coverage \
             --summary "$GITHUB_STEP_SUMMARY" \
             --github-output "$GITHUB_OUTPUT"
         id: coverage_gate
@@ -893,7 +980,7 @@ jobs:
         if: always()
         uses: codecov/codecov-action@v4
         with:
-          files: coverage/cobertura.xml
+          files: coverage/*/cobertura.xml
           fail_ci_if_error: false
           verbose: true
 

@@ -19,5 +19,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+fluxora_factory = { path = "../factory", features = ["testutils"] }
 proptest = "1"
 serde_json = { workspace = true }
