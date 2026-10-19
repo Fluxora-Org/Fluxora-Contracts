@@ -206,8 +206,9 @@ fn refundable_of_writes_nothing() {
 }
 
 #[test]
-fn stream_count_writes_nothing() {
+fn stream_count_is_permissionless_and_writes_nothing() {
     let (h, _, _) = fixture();
+    h.env.mock_auths(&[]);
     assert_pure(&h, "stream_count", || {
         assert_eq!(h.client.stream_count(), 2);
     });
