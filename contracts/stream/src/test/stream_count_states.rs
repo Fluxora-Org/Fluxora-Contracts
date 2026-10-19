@@ -63,3 +63,36 @@ fn stream_count_stays_one_when_top_up_is_refused_after_maturity() {
     );
     assert_eq!(h.client.stream_count(), 1);
 }
+
+#[test]
+fn stream_count_returns_one_for_a_matured_stream() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.warp_to(T0 + 100 * DAY);
+
+    // Maturity is determined by the schedule; it does not replace Active status.
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+    assert_eq!(h.client.stream_count(), 1);
+}
+
+#[test]
+fn stream_count_stays_one_when_pause_is_refused_after_maturity() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.warp_to(T0 + 100 * DAY);
+
+    // Maturity is determined by the schedule; it does not replace Active status.
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    assert_eq!(h.client.stream_count(), 1);
+
+    let before = h.get(id);
+    let err = h.client.try_pause(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamMatured);
+    assert_eq!(
+        h.get(id),
+        before,
+        "refused pause must not mutate the stream"
+    );
+    assert_eq!(h.client.stream_count(), 1);
+}

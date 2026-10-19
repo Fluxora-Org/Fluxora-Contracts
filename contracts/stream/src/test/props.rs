@@ -72,6 +72,7 @@ fn stream_of_curve(
         paused_total: 0,
         status: StreamStatus::Active,
         curve,
+        reference: None,
     }
 }
 

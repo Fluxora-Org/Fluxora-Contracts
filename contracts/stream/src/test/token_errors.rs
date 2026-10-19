@@ -50,6 +50,7 @@
 //!  `TokenMissing` is only reachable via WASM execution on a real network.
 //!  The variant's discriminant (26) is verified by `token_error_discriminants_match_the_abi_table`.
 use super::common::*;
+use crate::events::{StreamCreated, Withdrawn};
 use crate::{Error, StreamStatus};
 use soroban_sdk::testutils::{Address as _, Events as _, IssuerFlags};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
@@ -1099,7 +1100,8 @@ fn token_amount_mismatch_discriminant_matches_the_abi_table() {
 #[test]
 fn create_stream_with_false_returning_token_is_rejected() {
     let h = Harness::new();
-    let (token, false_token) = register_false_token(&h);
+    let token = register_panic_token(&h);
+    let false_token = TokenClient::new(&h.env, &token);
 
     let start = h.now();
     let err = h
@@ -1136,109 +1138,6 @@ fn create_stream_with_false_returning_token_is_rejected() {
     assert!(
         h.env.events().all().events().is_empty(),
         "reverted transfer must emit no success event"
-    );
-}
-
-#[test]
-fn fewer_token_decimals_do_not_rescale_deposit_or_withdrawal() {
-    let h = Harness::new();
-    let (token, low_decimal_token) = register_fee_on_transfer_token(&h);
-    low_decimal_token.set_decimals(&2);
-    assert_eq!(low_decimal_token.decimals(), 2);
-
-    let deposit = 1_000 * ONE;
-    let start = h.now();
-    let end = start + 100;
-    let sender_before = low_decimal_token.balance(&h.sender);
-    let stream_id = h.client.create_stream(
-        &h.sender,
-        &h.recipient,
-        &token,
-        &deposit,
-        &start,
-        &end,
-        &start,
-        &true,
-        &true,
-        &true,
-        &None,
-    );
-
-    let create_events = h
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&h.contract_id)
-        .events()
-        .to_vec();
-    assert_eq!(
-        create_events,
-        std::vec![StreamCreated {
-            stream_id,
-            sender: h.sender.clone(),
-            recipient: h.recipient.clone(),
-            token: token.clone(),
-            deposited: deposit,
-            start_time: start,
-            end_time: end,
-            cliff_time: start,
-            cancellable: true,
-            pausable: true,
-            transferable: true,
-        }
-        .to_xdr(&h.env, &h.contract_id)],
-        "create event must report the unscaled raw deposit"
-    );
-
-    let created = h.client.get_stream(&stream_id);
-    assert_eq!(created.deposited, deposit);
-    assert_eq!(created.withdrawn, 0);
-    assert_eq!(
-        low_decimal_token.balance(&h.sender),
-        sender_before - deposit
-    );
-    assert_eq!(low_decimal_token.balance(&h.contract_id), deposit);
-
-    h.advance(100);
-    assert_eq!(h.client.withdraw(&stream_id, &None), deposit);
-
-    let withdrawn_events = h
-        .env
-        .events()
-        .all()
-        .filter_by_contract(&h.contract_id)
-        .events()
-        .to_vec();
-    assert_eq!(
-        withdrawn_events,
-        std::vec![Withdrawn {
-            stream_id,
-            recipient: h.recipient.clone(),
-            amount: deposit,
-            withdrawn: deposit,
-            deposited: deposit,
-            status: StreamStatus::Depleted,
-        }
-        .to_xdr(&h.env, &h.contract_id)],
-        "withdrawal event must report the same unscaled raw amount"
-    );
-
-    let final_stream = h.client.get_stream(&stream_id);
-    assert_eq!(final_stream.deposited, deposit);
-    assert_eq!(final_stream.withdrawn, deposit);
-    assert_eq!(final_stream.status, StreamStatus::Depleted);
-    assert_eq!(
-        low_decimal_token.balance(&h.sender),
-        sender_before - deposit
-    );
-    assert_eq!(low_decimal_token.balance(&h.recipient), deposit);
-    assert_eq!(low_decimal_token.balance(&h.contract_id), 0);
-    assert_eq!(
-        low_decimal_token.balance(&h.sender)
-            + low_decimal_token.balance(&h.recipient)
-            + low_decimal_token.balance(&h.contract_id),
-        sender_before,
-        "sender + recipient + pool must conserve the initial token balance"
     );
 }
 

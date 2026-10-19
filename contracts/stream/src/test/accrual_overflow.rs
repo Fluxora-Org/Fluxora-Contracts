@@ -89,6 +89,7 @@ fn stream_of(
             StreamStatus::Active
         },
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 

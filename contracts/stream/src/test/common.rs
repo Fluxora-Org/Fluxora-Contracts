@@ -221,7 +221,7 @@ impl<'a> Harness<'a> {
             .saturating_div(storage::SECONDS_PER_LEDGER);
         self.env
             .ledger()
-            .set_sequence_number(info.sequence_number.saturating_add(ledgers));
+            .set_sequence_number(info.sequence_number.saturating_add(ledgers as u32));
     }
 
     /// Jump to an absolute timestamp.
