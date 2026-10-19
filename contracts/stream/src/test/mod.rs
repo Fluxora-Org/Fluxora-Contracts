@@ -31,6 +31,9 @@ mod halt;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;
+// Issue — `vested_of` refuses an unauthorised caller with the specific error,
+// leaves state untouched, and still answers the authorised caller.
+mod vested_of_auth;
 
 // Stage 1
 mod create;
