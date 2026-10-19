@@ -13,8 +13,8 @@ else: a script that invoked the wrong contract method, or that computed
 
 So this module runs the script for real, against stubbed network boundaries:
 
-* a fake `curl` answering the `getLatestLedger` JSON-RPC call with a chosen
-  ledger sequence — that is the only network input the status path needs;
+* a local JSON-RPC server answering `getLatestLedger` and `getLedgerEntries`
+  with chosen ledger and entry values;
 * a fake `stellar` that fails, standing in for the CLI reporting an archived
   entry, so the archived branch runs too.
 
@@ -26,7 +26,10 @@ network.
 
 import os
 import re
-import shutil
+import base64
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import stat
 import subprocess
 from pathlib import Path
@@ -121,29 +124,55 @@ def write_shim(directory: Path, name: str, body: str) -> None:
 
 
 @pytest.fixture
-def stub_bin(tmp_path: Path):
-    """A directory of fake `curl` / `stellar` binaries, ready for PATH."""
+def stub_bin(tmp_path: Path, monkeypatch):
+    """Serve the script's urllib JSON-RPC calls locally; never query testnet."""
+    servers = []
 
     def build(*, latest_ledger: int, stellar_exit: int = 0) -> Path:
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir(exist_ok=True)
 
-        # `latest_ledger()` posts JSON-RPC and pipes the body into python3, so
-        # the stub only has to print a well-formed response.
-        write_shim(
-            bin_dir,
-            "curl",
-            "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"sequence\":%d}}'\n"
-            % latest_ledger,
-        )
-        write_shim(
-            bin_dir,
-            "stellar",
-            f'echo "stub stellar: no live entry" >&2\nexit {stellar_exit}\n',
-        )
+        class Rpc(BaseHTTPRequestHandler):
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                method = request["method"]
+                if method == "getLatestLedger":
+                    result = {"sequence": latest_ledger}
+                elif method == "getLedgerEntries":
+                    result = {"entries": [{
+                        "liveUntilLedgerSeq": int_constant("LIVE_UNTIL_LEDGER")
+                            if latest_ledger < int_constant("LIVE_UNTIL_LEDGER") else 0,
+                        "lastModifiedLedgerSeq": int_constant("PLANTED_AT_LEDGER"),
+                        "xdr": base64.b64encode(b"canary").decode(),
+                    }]}
+                else:
+                    raise AssertionError(f"unexpected RPC method: {method}")
+                self.server.methods.append(method)
+                response = json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Rpc)
+        server.methods = []
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        servers.append((server, thread))
+        monkeypatch.setenv("RPC_URL", f"http://127.0.0.1:{server.server_port}")
+        write_shim(bin_dir, "stellar", f'echo "stub stellar: no live entry" >&2\nexit {stellar_exit}\n')
         return bin_dir
 
-    return build
+    yield build
+    for server, thread in servers:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        assert server.methods == ["getLatestLedger", "getLedgerEntries"]
 
 
 def run_canary(bin_dir: Path, *args: str) -> subprocess.CompletedProcess:
@@ -229,7 +258,7 @@ def test_status_run_reports_alive_and_exits_zero(stub_bin):
 
     assert result.returncode == 0, result.stderr
     assert "ALIVE" in result.stdout, result.stdout
-    assert "Not archived yet" in result.stdout
+    assert "The entry has not been evicted" in result.stdout
     # The remaining figure is the difference to live-until, not the difference
     # from plant time.
     remaining = int_constant("LIVE_UNTIL_LEDGER") - (planted + 10)
@@ -246,19 +275,19 @@ def test_status_run_with_no_ledgers_left_flags_archival(stub_bin):
 
     result = run_canary(bin_dir)
 
-    # The read fails, the invoke fails, and without --restore the script stops
-    # there and reports the round trip as pending rather than claiming success.
-    assert "PAST LIVE-UNTIL" in result.stdout, result.stdout
-    assert "read failed: the entry is archived" in result.stdout, result.stdout
-    assert "--restore" in result.stdout, result.stdout
+    assert result.returncode == 0, result.stderr
+    assert "ARCHIVED" in result.stdout, result.stdout
+    assert "value still served: canary" in result.stdout, result.stdout
+    assert "Status only" in result.stdout
+    assert "--round-trip" in result.stdout
 
 
 def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin):
     """`--restore` is opt-in: a monitoring job must be able to run read-only."""
-    calls = Path(os.environ.get("TMPDIR", "/tmp")) / "canary-stub-calls"
     bin_dir = stub_bin(
         latest_ledger=int_constant("LIVE_UNTIL_LEDGER") + 1, stellar_exit=1
     )
+    calls = bin_dir / "calls"
     # Log every `stellar` invocation so the restore step can be detected.
     write_shim(
         bin_dir,
@@ -270,7 +299,7 @@ def test_the_archived_branch_refuses_to_restore_unless_asked(stub_bin):
     result = run_canary(bin_dir)
 
     invocations = calls.read_text(encoding="utf-8") if calls.exists() else ""
-    assert "restore" not in invocations, (
+    assert not invocations, (
         f"the script restored without --restore:\n{invocations}"
     )
     assert result.returncode == 0, result.stderr
@@ -302,14 +331,9 @@ def test_the_script_requires_no_clone_and_no_local_state():
 
 
 def test_stub_environment_is_actually_used(stub_bin):
-    """Guard on the harness itself: the stubs must shadow the real binaries.
-
-    Without this, a `curl` that happened to be installed would let the "offline"
-    tests reach the real RPC endpoint, and the assertions above would be
-    measuring the network rather than the script.
-    """
+    """Run the real urllib path and verify the chosen offline ledger appears."""
     bin_dir = stub_bin(latest_ledger=123)
-    resolved = shutil.which("curl", path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    assert Path(resolved).parent == bin_dir, (
-        f"the stub curl at {bin_dir} did not take precedence over {resolved}"
-    )
+    result = run_canary(bin_dir)
+    assert result.returncode == 0, result.stderr
+    assert "current      ledger 123" in result.stdout
+    assert os.environ["RPC_URL"].startswith("http://127.0.0.1:")

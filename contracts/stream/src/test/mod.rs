@@ -28,9 +28,16 @@ mod error_reachability;
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
 mod halt;
+// Issue #2047 — `halt` boundary behaviour: zero, one, the maximum accepted
+// value, and one past it, pinned on both the halt state and the ledger
+// timestamp it records. Every refusal is a typed error and nothing panics.
+mod halt_boundaries;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;
+// Issue — `vested_of` refuses an unauthorised caller with the specific error,
+// leaves state untouched, and still answers the authorised caller.
+mod vested_of_auth;
 
 // Stage 1
 mod create;
@@ -42,8 +49,8 @@ mod withdraw_events;
 // Issue #1839: withdrawing exactly the full withdrawable amount — the boundary
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
-mod withdraw_exact_balance;
 mod settled_dust;
+mod withdraw_exact_balance;
 
 // Stage 2
 mod auth;
@@ -63,6 +70,10 @@ mod delegate_top_up;
 mod delegation;
 // Issue #1845: delegation surviving a recipient transfer.
 mod delegation_transfer;
+// Repeat-submission coverage for `delegate_pause`: a second call is refused
+// with `StreamAlreadyPaused`, state is preserved, no tokens move, and no
+// event is emitted for the refused call.
+mod delegate_pause_repeat;
 
 // Issue #1882 — stream parties on the delegate paths without a grant.
 mod delegate_party_without_grant;
@@ -138,7 +149,12 @@ mod event_ordering_failed_transfer;
 // asserted after failed creations, after every terminal operation, under
 // deliberate counter corruption, and across randomized sequences.
 mod stream_count_consistency;
+// Issue #1699 — stream_count consistency across stream statuses.
 mod stream_count_states;
+
+// Issue — `stream_count` boundary behaviour: zero, one, the maximum accepted
+// value, and one past it (refused with a typed error, never a panic).
+mod stream_count_boundaries;
 
 // Issue #1686: every read entry point's storage/TTL behaviour, pinned to
 // docs/ABI.md. `read_methods_no_side_effects` (#1566) existed but was never
@@ -187,3 +203,7 @@ mod one_second_stream;
 // (`i128::MAX`), driven end to end through the public ABI on a dedicated
 // full-range asset; also pins the creation-guard boundary that rejects it.
 mod max_deposit;
+
+// Issue #2071 — pin the boundary behaviour of `withdrawable_of`: zero, one,
+// the maximum accepted stream id, and one past it.
+mod withdrawable_of_boundary;

@@ -723,6 +723,7 @@ fn paused_exactly_at_the_cliff_instant_leaves_the_gate_open() {
     assert_eq!(
         published_by_stream(&h),
         std::vec![Paused {
+            recipient: h.recipient.clone(),
             stream_id: id,
             sender: h.sender.clone(),
             paused_at: cliff,
@@ -793,6 +794,9 @@ fn paused_exactly_at_the_cliff_instant_leaves_the_gate_open() {
     assert_eq!(
         withdrawn_events,
         std::vec![Withdrawn {
+            sender: h.sender.clone(),
+            paused_at: s.paused_at,
+            paused_total: s.paused_total,
             stream_id: id,
             recipient: h.recipient.clone(),
             amount: 1000 * ONE,
@@ -837,6 +841,7 @@ fn paused_exactly_at_the_cliff_instant_leaves_the_gate_open() {
     assert_eq!(
         published_by_stream(&h),
         std::vec![Resumed {
+            recipient: h.recipient.clone(),
             stream_id: id,
             sender: h.sender.clone(),
             paused_duration: 500,

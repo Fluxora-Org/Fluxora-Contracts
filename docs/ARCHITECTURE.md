@@ -22,9 +22,7 @@ can be withdrawn. The contract is a payment primitive, not a platform.
 
 Four properties shape everything below:
 
-* **No admin and no upgrade path.** There is no `init`, no owner, no settable
-  parameter and no migration entry point. The deployed WASM is frozen, so the
-  only authority a stream answers to is the parties named in it.
+* **No upgrade path or custodial administrator.** The deployed WASM is immutable. An optional, one-shot halt operator may pause mutations, but cannot move funds or change stream terms.
 * **No funds are ever held by discretion.** At every instant, the pool a stream
   is backed by equals the sum of what is still owed — nothing is parked, and
   there is no fee, no sweep and no treasury.
@@ -42,6 +40,7 @@ Four properties shape everything below:
 |---|---|---|---|
 | Stream contract | `contracts/stream` | **product** | The deployed contract: streams, delegation, TTL maintenance. Everything in §4–§9 describes this crate. |
 | Archival probe | `contracts/archival-probe` | no | A throwaway canary whose only job is to archive on the network's schedule, so the live archival/restore round trip can be observed. Never released, never deployed to mainnet. |
+| Factory contract | `contracts/factory` | separate | Policy configuration used by factory-routed stream creation; built and tested as a workspace member. |
 | Provenance tool | `tools/provenance` | no | A host-only binary (`fluxora-provenance`) that hashes released wasm and verifies it against the recorded `provenance.json` and `SHASUMS`. A workspace member so it resolves through the root lockfile and is covered by the normal workspace checks, but excluded from wasm-target builds because it needs `std`. |
 | Release tooling | `script/release.sh` | no | The only command that produces release artifacts. Builds the product package alone and fails if a probe wasm appears among its outputs. |
 | CI and validation | `script/`, `.github/workflows/ci.yml` | no | Wasm size budget, per-crate coverage floors, migration/ABI consistency, doc alignment, gas validation, snapshot drift. |
@@ -62,7 +61,7 @@ Two structural consequences:
 ## 3. Trust boundaries
 
 Nothing in the system holds a key that can act on a stream it is not a party to.
-There are five addresses that matter, and no sixth:
+The following parties form the trust boundaries:
 
 | Party | Authority | Enforced by |
 |---|---|---|
@@ -70,10 +69,11 @@ There are five addresses that matter, and no sixth:
 | **Recipient** | `withdraw` and `batch_withdraw`; `transfer_recipient` where `transferable`; granting and revoking recipient-side delegation | `require_auth` on the calling recipient and on the stream's current recipient |
 | **Delegate** | Exactly the operations in a live, unexpired `(stream_id, delegate)` grant — no more, never the grant itself | Grant check, then `require_auth` on the delegate; a delegate can neither grant to itself nor use a bit it does not hold |
 | **Token contract** | Moving the funds a stream pulls or pays out. Trusted by *interface* (SEP-41) and assumed non-rebasing, non-fee-on-transfer | Every deposit is asserted to deliver exactly the requested amount; a failing token fails the whole call closed |
+| **Halt operator** | `halt` and `resume_contract` after one-shot installation | `require_auth` on the stored operator |
+| **Factory administrator** | Configure the selected factory policy | Factory admin authentication; no access to existing stream funds |
 | **Anyone** | Reading every view, extending any stream's TTL, and planting the archival canary | No auth on views and TTL maintenance: they cannot move value, so they cannot be abused by being permissionless |
 
-There is deliberately no registration, no allowlist, no pause-the-protocol
-switch and no operator: a stream's parties are the whole trust model.
+Factory policy applies only to factory-routed creation. The optional halt operator can stop mutations but cannot transfer pooled funds or upgrade the contract.
 
 ---
 
@@ -136,14 +136,9 @@ opportunistically on read. The network's own minimum (`min_persistent_ttl`,
 
 The consequence is handled explicitly rather than assumed away:
 
-* if an entry does archive anyway, invoking fails at the network level before the
-  contract body runs —
-  the caller resubmits with `RestoreFootprint` and reads the same data back;
-* `stream_exists` is the predicate that tells *never existed* from *archived,
-  needs restoring*, so a client can offer a restore instead of surfacing a raw
-  error;
-* the archival probe exists because that failure mode cannot be reproduced
-  in-process: the SDK test host auto-restores an expired entry on read. See
+* Protocol 23 and later automatically restore archived entries touched by an
+  invocation; the testnet canary verified this on 2026-09-28.
+* Restoration cost and rent remain relevant even when reads succeed. See
   [`KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md) §1 and
   [`archival-canary.md`](archival-canary.md).
 
@@ -151,7 +146,7 @@ The consequence is handled explicitly rather than assumed away:
 
 ## 5. Storage model
 
-Four keys, and no others:
+The storage key inventory (including the reserved split-stream key):
 
 | Key | Storage | Contents |
 |---|---|---|
@@ -159,6 +154,12 @@ Four keys, and no others:
 | `DataKey::StreamCount` | instance | Streams successfully created; incremented in the same transaction as `NextStreamId` and the new entry |
 | `DataKey::Stream(u64)` | persistent | The stream record: parties, token, deposit, schedule, flags, status, `withdrawn` |
 | `DataKey::Delegate(u64, Address)` | persistent | A delegation grant: operation bitmask and optional expiry |
+| `DataKey::PooledBalance(Address)` | instance | Expected per-token pool balance, reconciled after transfers |
+| `DataKey::StreamMetadata(u64)` | persistent | Non-default cliff mode and optional reference; absence preserves legacy Schedule/None defaults |
+| `DataKey::StreamCurve(u64)` | persistent | Non-linear release curve; absence means linear |
+| `DataKey::HaltOperator` | instance | One-shot halt operator address |
+| `DataKey::HaltedAt` | instance | Timestamp while the contract is halted |
+| `DataKey::StreamShares(u64)` | persistent | Reserved share schema; no public split-stream creation method exists |
 
 Two properties follow from this layout, and both are load-bearing:
 
@@ -176,14 +177,15 @@ Two properties follow from this layout, and both are load-bearing:
 
 ## 6. Entry point surface
 
-**16 core entry points plus 8 delegation entry points**, as `MIGRATION.md` §3
+**28 core entry points plus 8 delegation entry points**, as `MIGRATION.md` §3
 states. Grouped by what they touch:
 
 | Group | Entry points |
 |---|---|
-| Lifecycle | `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`, `resume`, `transfer_recipient` |
+| Lifecycle | `create_stream_with_curve`, `create_stream_with_cliff_mode`, `create_stream_via_factory`, `batch_create`, `batch_cancel`, `reclaim_dust`, `create_stream`, `top_up`, `withdraw`, `batch_withdraw`, `cancel`, `pause`, `resume`, `transfer_recipient` |
 | Delegation | `grant_delegate`, `revoke_delegate`, `delegate_withdraw`, `delegate_cancel`, `delegate_pause`, `delegate_resume`, `delegate_top_up`, `delegate_transfer_recipient` |
-| Views | `get_stream`, `stream_count`, `stream_exists`, `withdrawable_of`, `vested_of`, `refundable_of` |
+| Views | `upgradeable`, `halted`, `halt_operator`, `get_stream`, `stream_count`, `stream_exists`, `withdrawable_of`, `vested_of`, `refundable_of` |
+| Emergency halt | `set_halt_operator`, `halt`, `resume_contract` |
 | TTL maintenance | `extend_stream_ttl`, `batch_extend_ttl` |
 
 A batch is capped at `MAX_BATCH_SIZE` (16) ids on every batch entry point, and
@@ -218,7 +220,7 @@ returns, so a reverted transfer takes the event with it.
 Recorded here because their absence is an architectural decision, not an
 oversight — each is argued at length in [`MIGRATION.md`](MIGRATION.md) §3 and §7:
 
-* an admin key, an upgrade path, protocol fees, or any global pause;
+* a custodial admin key, an upgrade path, or protocol fees;
 * on-chain stream discovery and per-user indexes;
 * scheduled or keeper-driven withdrawal (the delegated surface covers the
   keeper case without a second scheduler);
@@ -238,7 +240,7 @@ oversight — each is argued at length in [`MIGRATION.md`](MIGRATION.md) §3 and
   the release path builds the product package only;
 * the storage table names every `DataKey` variant and no others;
 * the entry point groups are exactly the committed ABI's function names, each
-  listed once, split into the documented 16 core and 8 delegation;
+  listed once, split into the documented 28 core and 8 delegation;
 * the trust boundary claims match the per-entry point authority labels in
   [`audit.md`](audit.md); and
 * every "not here" entry is genuinely absent from the ABI.

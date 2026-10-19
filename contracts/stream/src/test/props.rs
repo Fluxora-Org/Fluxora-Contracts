@@ -56,6 +56,7 @@ fn stream_of_curve(
 ) -> Stream {
     let env = Env::default();
     Stream {
+        reference: None,
         sender: Address::generate(&env),
         recipient: Address::generate(&env),
         token: Address::generate(&env),

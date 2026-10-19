@@ -35,13 +35,10 @@ LIB_RS   = REPO_ROOT / "contracts" / "stream" / "src" / "lib.rs"
 ABI_MD   = REPO_ROOT / "docs" / "ABI.md"
 
 # ---------------------------------------------------------------------------
-# Entry points that live in lib.rs as #[contractimpl] pub fn but are
-# intentionally excluded from the ABI JSON and ABI.md  (internal or
-# meta-methods that consumers never call directly).
+# Every #[contractimpl] public method is exported, including metadata views
+# such as upgradeable. Keep the inventory complete.
 # ---------------------------------------------------------------------------
-EXCLUDE_FROM_ABI = {
-    "upgradeable",   # internal flag, not a callable ABI entrypoint
-}
+EXCLUDE_FROM_ABI: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Entry-point names that are in the ABI JSON but are not yet fully

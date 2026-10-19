@@ -107,7 +107,7 @@ pub use storage::{
 pub use types::op;
 pub use types::{
     BatchCancelOutcome, BatchCreateRequest, CliffMode, DataKey, DelegateGrant, ReleaseCurve,
-    Stream, StreamStatus, MAX_REFERENCE_LENGTH,
+    Stream, StreamStatus, MAX_REFERENCE_LENGTH, MAX_SPLIT_RECIPIENTS, TOTAL_BPS,
 };
 
 use soroban_sdk::{
@@ -543,6 +543,7 @@ impl FluxoraStream {
         transferable: bool,
         reference: Option<String>,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
         sender.require_auth();
 
         Self::create_stream_inner(
@@ -652,6 +653,8 @@ impl FluxoraStream {
         transferable: bool,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
         Self::create_stream_inner(
             env,
             sender,
@@ -694,9 +697,8 @@ impl FluxoraStream {
         reference: Option<String>,
         curve: ReleaseCurve,
     ) -> Result<u64, Error> {
-        // Emergency halt (#1818): refuse state changes before anything else.
-        Self::require_not_halted(&env)?;
-        sender.require_auth();
+        // The public creation entry point checks halt and sender authorization
+        // once before reaching this private per-item implementation.
 
         if sender == recipient {
             return Err(Error::SelfStream);
@@ -785,6 +787,7 @@ impl FluxoraStream {
         sender: Address,
         requests: Vec<BatchCreateRequest>,
     ) -> Result<Vec<u64>, Error> {
+        Self::require_not_halted(&env)?;
         if requests.is_empty() {
             return Err(Error::EmptyBatch);
         }
@@ -890,6 +893,8 @@ impl FluxoraStream {
         pausable: bool,
         transferable: bool,
     ) -> Result<u64, Error> {
+        Self::require_not_halted(&env)?;
+        sender.require_auth();
         // Load policy from the factory contract via cross-contract calls.
         // `get_factory_config` and `is_allowlisted` are permissionless read
         // views — no auth is required or consumed.
@@ -1563,7 +1568,7 @@ impl FluxoraStream {
         storage::save_stream(env, stream_id, stream);
 
         if refund > 0 {
-            storage::debit_pool(&env, &token, refund)?;
+            storage::debit_pool(env, &token, refund)?;
             token_transfer(
                 env,
                 &token,
@@ -1575,7 +1580,7 @@ impl FluxoraStream {
         // Reconcile the pool now the refund has left it. Checked even when the
         // refund was zero: a rebase since the last operation on this token is
         // exactly as dangerous with nothing to refund.
-        verify_pool_balance(&env, &token)?;
+        verify_pool_balance(env, &token)?;
 
         // Issue #1584: the event's `vested` is read off the settled stream by
         // the helper (`stream.deposited`, set above), so it cannot disagree with
@@ -2005,6 +2010,18 @@ impl FluxoraStream {
     }
 
     /// Pause as a delegate. Requires [`op::PAUSE`] grant.
+    ///
+    /// # Repeat-submission behaviour
+    ///
+    /// A second call with the same `stream_id` and `delegate` after the stream
+    /// is already `Paused` is **refused** with [`Error::StreamAlreadyPaused`].
+    /// It is *not* a no-op: accepting it silently would overwrite `paused_at`
+    /// with the later timestamp, silently erasing the accrued paused duration
+    /// and reducing the amount the recipient eventually receives.
+    ///
+    /// Callers retrying after a timeout must branch on the returned error:
+    /// `StreamAlreadyPaused` means the first submission landed and the stream
+    /// is already frozen; any other error means the operation genuinely failed.
     pub fn delegate_pause(env: Env, stream_id: u64, delegate: Address) -> Result<(), Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
         Self::require_not_halted(&env)?;
@@ -2063,6 +2080,19 @@ impl FluxoraStream {
     }
 
     /// Top up as a delegate. Requires [`op::TOP_UP`] grant.
+    ///
+    /// # Idempotency / repeat submission
+    ///
+    /// This entry point is **not idempotent**: calling it twice in a row
+    /// applies the top-up twice. Each call pulls `amount` from the sender and
+    /// extends the schedule by the same `delta`, so two calls leave the stream
+    /// with `deposited + 2 * amount` and `end_time + 2 * delta` — the same
+    /// state as a single call with `2 * amount`. A retry after a timeout is
+    /// therefore *not* safe to submit blindly; the client must first confirm
+    /// whether the first call landed (e.g. by reading `get_stream`) before
+    /// resubmitting. This matches [`top_up`](Self::top_up), which has the same
+    /// repeat-application semantics; see `test::delegate_top_up_twice` for the
+    /// pinned behaviour and the token/event assertions.
     pub fn delegate_top_up(
         env: Env,
         stream_id: u64,
@@ -2400,6 +2430,15 @@ impl FluxoraStream {
     /// [`halt`](Self::halt) and [`resume_contract`](Self::resume_contract): it
     /// cannot move funds, cancel a stream, change a schedule, or withdraw. It
     /// also cannot be removed.
+    ///
+    /// # Repeat submission
+    ///
+    /// A second call is **refused** with [`Error::HaltOperatorAlreadySet`]
+    /// rather than silently accepted. This is the safe choice for a retry
+    /// after a client timeout: the first call's effect (operator installed,
+    /// `halt_operator_set` event emitted) is left exactly as it was, no
+    /// second event is emitted, and no token balance moves on either call —
+    /// this entry point never touches the token pool.
     pub fn set_halt_operator(env: Env, operator: Address) -> Result<(), Error> {
         operator.require_auth();
         if storage::halt_operator(&env).is_some() {

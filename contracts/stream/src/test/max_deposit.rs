@@ -113,6 +113,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
 
     let created = f.stream_events();
     let expected = StreamCreated {
+        reference: None,
+        curve: crate::ReleaseCurve::Linear,
+        cliff_mode: crate::CliffMode::Schedule,
         stream_id: id,
         sender: h.sender.clone(),
         recipient: h.recipient.clone(),
@@ -178,6 +181,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
 
     let drained = f.stream_events();
     let expected = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: deposit,

@@ -83,6 +83,9 @@ fn assert_withdrawn_event(h: &Harness, id: u64, recipient_before: i128) -> i128 
     );
 
     let expected = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: payout,
@@ -131,6 +134,8 @@ fn assert_cancelled_event(
     let claimable = h.client.withdrawable_of(&id);
 
     let expected = Cancelled {
+        paused_at: None,
+        paused_total: 0,
         stream_id: id,
         sender: h.sender.clone(),
         recipient: h.recipient.clone(),
@@ -332,8 +337,8 @@ fn same_ledger_cancel_then_withdraw(offset: u64) {
     if expected_vested == 0 {
         assert_eq!(
             h.client.try_withdraw(&id, &None).unwrap_err().unwrap(),
-            Error::NothingToWithdraw,
-            "offset={offset}: expected NothingToWithdraw after cancel with no vesting",
+            Error::StreamTerminated,
+            "offset={offset}: a cancelled stream with no vested tail is terminal",
         );
     } else {
         let recipient_before_withdraw = h.balance(&h.recipient);

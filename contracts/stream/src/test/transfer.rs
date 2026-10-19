@@ -4,7 +4,7 @@ use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{Address, IntoVal};
 
 use super::common::*;
-use crate::{Error, Stream, StreamStatus};
+use crate::{DataKey, Error, Stream, StreamStatus};
 
 fn assert_claim(
     h: &Harness,
@@ -30,6 +30,47 @@ fn assert_only_recipient_changed(before: &Stream, after: &Stream, new_recipient:
     let mut expected = before.clone();
     expected.recipient = new_recipient.clone();
     assert_eq!(after, &expected);
+}
+
+#[test]
+fn transfer_accepts_stream_ids_zero_and_one() {
+    let h = Harness::new();
+    let zero = h.create_simple(1_000 * ONE, 100 * DAY);
+    let one = h.create_simple(1_000 * ONE, 100 * DAY);
+    assert_eq!([zero, one], [0, 1]);
+
+    h.client.transfer_recipient(&zero, &h.other);
+    h.client.transfer_recipient(&one, &h.other);
+
+    assert_eq!(h.get(zero).recipient, h.other);
+    assert_eq!(h.get(one).recipient, h.other);
+}
+
+#[test]
+fn transfer_accepts_max_stream_id_and_refuses_one_past_with_typed_error() {
+    let h = Harness::new();
+    h.env.as_contract(&h.contract_id, || {
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::NextStreamId, &(u64::MAX - 1));
+        h.env
+            .storage()
+            .instance()
+            .set(&DataKey::StreamCount, &(u64::MAX - 1));
+    });
+
+    let max_id = h.create_simple(1_000 * ONE, 100 * DAY);
+    assert_eq!(max_id, u64::MAX - 1);
+    h.client.transfer_recipient(&max_id, &h.other);
+    assert_eq!(h.get(max_id).recipient, h.other);
+
+    let error = h
+        .client
+        .try_transfer_recipient(&u64::MAX, &h.other)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(error, Error::StreamNotFound);
 }
 
 #[test]

@@ -1,3 +1,4 @@
+
 //! Stage 2 — pause and resume.
 //!
 //! The model: pausing freezes the stream's clock and pushes the effective end
@@ -1036,8 +1037,17 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
     // state) and compare byte-for-byte, matching the pattern in
     // withdraw_events.rs / cancel_events.rs.
     {
+        // The SDK retains events for the last invocation; capture before get_stream.
+        let published: std::vec::Vec<_> = h
+            .env
+            .events()
+            .all()
+            .filter_by_contract(&h.contract_id)
+            .events()
+            .to_vec();
         let s_after = h.get(id);
         let expected_event = Resumed {
+            recipient: h.recipient.clone(),
             stream_id: id,
             sender: h.sender.clone(),
             // paused_duration = wall-clock delta from pause_instant to now
@@ -1046,14 +1056,6 @@ fn resume_exactly_at_end_time_conservation_and_final_state() {
             paused_total: s_after.paused_total,
             recipient: h.recipient.clone(),
         };
-
-        let published: std::vec::Vec<_> = h
-            .env
-            .events()
-            .all()
-            .filter_by_contract(&h.contract_id)
-            .events()
-            .to_vec();
 
         assert_eq!(
             published,
@@ -1236,5 +1238,123 @@ fn resume_at_end_time_with_full_duration_paused() {
     );
     assert_eq!(h.client.withdraw(&id, &None), deposit);
     assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    h.assert_pool_exact();
+}
+
+// --- Boundary behaviour of `pause` -----------------------------------------
+//
+// `pause` takes no numeric arguments, so the boundaries that matter are the
+// stream-clock values at which it is invoked: zero elapsed, one second
+// elapsed, the maximum accepted elapsed time (exactly `end_time`), and one
+// past it. Each case must either succeed or be refused with a typed error —
+// never panic.
+
+/// Pause at zero elapsed stream time (the creation instant). This is the
+/// lower boundary: `paused_at == start_time`, `paused_total == 0`.
+#[test]
+fn pause_boundary_zero_elapsed() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Zero seconds elapsed since creation.
+    h.client.pause(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Paused);
+    assert_eq!(s.paused_at, Some(T0));
+    assert_eq!(s.paused_total, 0);
+    assert_eq!(h.client.vested_of(&id), 0);
+
+    // Resume immediately: zero-duration pause must not be recorded.
+    h.client.resume(&id);
+    assert_eq!(h.get(id).paused_total, 0);
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    h.assert_pool_exact();
+}
+
+/// Pause after exactly one second of stream time. The smallest non-zero
+/// elapsed value must be handled without off-by-one drift.
+#[test]
+fn pause_boundary_one_second_elapsed() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(1);
+    h.client.pause(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Paused);
+    assert_eq!(s.paused_at, Some(T0 + 1));
+    assert_eq!(s.paused_total, 0);
+
+    // One second of stream time has accrued (rate is 10 ONE/day).
+    assert_eq!(h.client.vested_of(&id), 10 * ONE / (DAY / 1));
+
+    h.advance(1);
+    h.client.resume(&id);
+    assert_eq!(h.get(id).paused_total, 1);
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    h.assert_pool_exact();
+}
+
+/// Pause at exactly `end_time` — the maximum accepted stream-clock value.
+/// The stream is fully vested; pausing must succeed and freeze at maturity.
+#[test]
+fn pause_boundary_at_max_accepted_time() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let end = T0 + 100 * DAY;
+
+    h.warp_to(end);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    // Pausing at exactly end_time must succeed.
+    h.client.pause(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Paused);
+    assert_eq!(s.paused_at, Some(end));
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    // Resume and confirm the stream remains fully matured.
+    h.advance(DAY);
+    h.client.resume(&id);
+    assert_eq!(h.get(id).paused_total, DAY);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE);
+    h.assert_pool_exact();
+}
+
+/// One second past `end_time`: the stream is already matured, so pausing must
+/// still succeed (it is not a terminal state) and must not panic or overflow.
+/// The refusal path here is `resume` on a depleted stream, not `pause`.
+#[test]
+fn pause_boundary_one_past_max_accepted_time() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let end = T0 + 100 * DAY;
+
+    h.warp_to(end + 1);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    // Pausing one second past end_time must not panic.
+    h.client.pause(&id);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Paused);
+    assert_eq!(s.paused_at, Some(end + 1));
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    // Drain while paused: depletion is terminal and closes the pause.
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE);
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Depleted);
+    assert_eq!(s.paused_at, None);
+
+    // Every subsequent transition is a typed error, never a panic.
+    assert_eq!(
+        h.client.try_pause(&id).unwrap_err().unwrap(),
+        Error::StreamTerminated,
+    );
+    assert_eq!(
+        h.client.try_resume(&id).unwrap_err().unwrap(),
+        Error::StreamTerminated,
+    );
     h.assert_pool_exact();
 }

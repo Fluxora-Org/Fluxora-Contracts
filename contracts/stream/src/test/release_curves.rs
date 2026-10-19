@@ -84,6 +84,8 @@ fn create_with_curve(
 fn expected_created(h: &Harness, id: u64, curve: ReleaseCurve) -> xdr::ContractEvent {
     let s = h.get(id);
     StreamCreated {
+        reference: None,
+        cliff_mode: crate::CliffMode::Schedule,
         stream_id: id,
         sender: h.sender.clone(),
         recipient: h.recipient.clone(),

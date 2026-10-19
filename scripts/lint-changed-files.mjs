@@ -123,7 +123,7 @@ function main() {
   const packagesToLint = new Set();
   for (const f of rustFiles) {
     if (f.startsWith("contracts/stream/")) packagesToLint.add("fluxora-stream");
-    if (f.startsWith("contracts/factory/")) packagesToLint.add("fluxora-factory");
+    if (f.startsWith("contracts/factory/")) packagesToLint.add("fluxora_factory");
     if (f.startsWith("contracts/archival-probe/"))
       packagesToLint.add("fluxora-archival-probe");
     if (f.startsWith("tools/provenance/")) packagesToLint.add("fluxora-provenance");

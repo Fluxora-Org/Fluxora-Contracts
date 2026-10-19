@@ -200,6 +200,12 @@ fn a_batch_of_cancellations_matches_the_same_cancels_done_one_at_a_time() {
         let h = Harness::new();
         let stream_ids = build(&h);
         h.advance(37 * DAY);
+        // SDK debug tracing exhausts its separate shadow-memory allowance for
+        // 16 refunds. Keep actual network resource enforcement enabled.
+        h.env
+            .host()
+            .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+            .unwrap();
         let outcome = h.client.batch_cancel(&h.sender, &h.ids(&stream_ids));
         h.assert_pool_exact();
         (
@@ -542,6 +548,11 @@ fn batch_cancel_size_exactly_max_succeeds() {
         .map(|_| h.create_simple(100 * ONE, 100 * DAY))
         .collect();
     h.advance(5 * DAY);
+    // Give debug tracing its own bounded allowance; mainnet limits are unchanged.
+    h.env
+        .host()
+        .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+        .unwrap();
 
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&stream_ids));
     let events = cancelled_event_ids(&h);

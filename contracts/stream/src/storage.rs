@@ -89,7 +89,9 @@
 use soroban_sdk::{Address, Env};
 
 use crate::error::Error;
-use crate::types::{DataKey, DelegateGrant, ReleaseCurve, Stream, StreamRecord, StreamShares};
+use crate::types::{
+    CliffMode, DataKey, DelegateGrant, ReleaseCurve, Stream, StreamMetadata, StreamRecord,
+};
 
 /// Nominal Stellar ledger close time, in seconds.
 ///
@@ -265,6 +267,16 @@ pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
     env.storage()
         .persistent()
         .extend_ttl(&DataKey::Stream(stream_id), target, target);
+    if stream.curve != ReleaseCurve::Linear {
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::StreamCurve(stream_id), target, target);
+    }
+    if stream.cliff_mode != CliffMode::DEFAULT || stream.reference.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::StreamMetadata(stream_id), target, target);
+    }
 }
 
 /// Read a stream, bumping its TTL on the way out.
@@ -289,13 +301,15 @@ pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
 }
 
 /// Decode a stream, stitching the frozen v1 [`StreamRecord`] back together with
-/// its [`ReleaseCurve`] side-car.
+/// its release curve and optional v2 metadata entries.
 ///
 /// The stored value is the v1 layout ([`StreamRecord`]) — appending a field to
 /// it would make every stream written before curves existed undecodable; see
 /// the type docs. The curve lives under [`DataKey::StreamCurve`] and is written
 /// only for non-linear streams, so a missing entry means
 /// [`ReleaseCurve::Linear`] and decodes exactly as a v1 stream always did.
+/// Missing [`DataKey::StreamMetadata`] preserves the legacy Schedule cliff
+/// and absent reference. Present metadata is renewed alongside the record.
 fn read_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
     let record: StreamRecord = env
         .storage()
@@ -307,7 +321,16 @@ fn read_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
         .persistent()
         .get(&DataKey::StreamCurve(stream_id))
         .unwrap_or(ReleaseCurve::Linear);
-    Ok(record.into_stream(curve))
+    let mut stream = record.into_stream(curve);
+    if let Some(metadata) = env
+        .storage()
+        .persistent()
+        .get::<_, StreamMetadata>(&DataKey::StreamMetadata(stream_id))
+    {
+        stream.cliff_mode = metadata.cliff_mode;
+        stream.reference = metadata.reference;
+    }
+    Ok(stream)
 }
 
 /// Write a stream back and bump its TTL.
@@ -334,6 +357,18 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
             .persistent()
             .set(&DataKey::StreamCurve(stream_id), &stream.curve);
     }
+    let metadata_key = DataKey::StreamMetadata(stream_id);
+    if stream.cliff_mode != CliffMode::DEFAULT || stream.reference.is_some() {
+        env.storage().persistent().set(
+            &metadata_key,
+            &StreamMetadata {
+                cliff_mode: stream.cliff_mode,
+                reference: stream.reference.clone(),
+            },
+        );
+    } else {
+        env.storage().persistent().remove(&metadata_key);
+    }
     if is_new {
         let current: u64 = env
             .storage()
@@ -355,13 +390,6 @@ pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
         extend_instance(env);
     }
     extend_stream(env, stream_id, stream);
-    if stream.curve != ReleaseCurve::Linear {
-        // Give the side-car the same lifetime as the record it annotates.
-        let target = ttl_target_ledgers(env, stream);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::StreamCurve(stream_id), target, target);
-    }
 }
 
 /// Return the next stream id without advancing the counter.
@@ -529,50 +557,6 @@ pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<De
     env.storage()
         .persistent()
         .get(&DataKey::Delegate(stream_id, delegate.clone()))
-}
-
-// ---------------------------------------------------------------------------
-// Split-stream share allocations
-// ---------------------------------------------------------------------------
-
-/// Persist [`StreamShares`] alongside the parent stream and give it the same
-/// TTL target.
-///
-/// Must be called at the same time as [`save_stream`] for a new split stream
-/// so the two entries have the same initial TTL. `save_stream` bumps the parent
-/// entry; this helper mirrors that bump for the shares entry.
-pub fn save_shares(env: &Env, stream_id: u64, stream: &Stream, shares: &StreamShares) {
-    let key = DataKey::StreamShares(stream_id);
-    env.storage().persistent().set(&key, shares);
-    let target = ttl_target_ledgers(env, stream);
-    env.storage().persistent().extend_ttl(&key, target, target);
-}
-
-/// Read [`StreamShares`] and bump the entry's TTL alongside the parent stream.
-///
-/// Used by mutating paths (`withdraw_share`) that need to update per-share
-/// `withdrawn` counters. Returns `None` if the stream has no shares entry —
-/// i.e. it is a plain single-recipient stream.
-pub fn load_shares(env: &Env, stream_id: u64, stream: &Stream) -> Option<StreamShares> {
-    let key = DataKey::StreamShares(stream_id);
-    let shares: Option<StreamShares> = env.storage().persistent().get(&key);
-    if shares.is_some() {
-        let target = ttl_target_ledgers(env, stream);
-        env.storage().persistent().extend_ttl(&key, target, target);
-    }
-    shares
-}
-
-/// Read [`StreamShares`] without touching its TTL.
-///
-/// Used by the read-only `get_stream_shares` view and by `cancel`, where we
-/// need to inspect the shares without disturbing them (cancel does not modify
-/// shares at all; each recipient's per-share `withdrawn` is unaffected by the
-/// sender reclaiming the unvested remainder). Returns `None` for plain streams.
-pub fn peek_shares(env: &Env, stream_id: u64) -> Option<StreamShares> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StreamShares(stream_id))
 }
 
 // ---------------------------------------------------------------------------

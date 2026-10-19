@@ -83,6 +83,9 @@ fn assert_single_withdrawn_event(h: &Harness, stream_id: u64, payout: i128) {
     let stream = h.get(stream_id);
 
     let expected = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
         stream_id,
         recipient: h.recipient.clone(),
         amount: payout,
@@ -271,6 +274,9 @@ fn concurrent_delegates_drain_to_depleted_in_one_ledger() {
     // Capture the events immediately — before any read-only client call, which
     // replaces the last-invocation event buffer (see `withdraw_events`).
     let settling = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: 500 * ONE,
