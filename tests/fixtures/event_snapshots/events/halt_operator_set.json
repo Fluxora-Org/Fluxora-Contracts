@@ -1,0 +1,11 @@
+{
+  "event": "HaltOperatorSet",
+  "topic": "halt_operator_set",
+  "fields": [
+    {
+      "name": "operator",
+      "type": "Address",
+      "topic": true
+    }
+  ]
+}

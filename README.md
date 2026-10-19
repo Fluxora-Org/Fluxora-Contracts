@@ -13,13 +13,20 @@ subscription billing, vesting schedules. The contract is the product.
 | Protocol | 27 (live on testnet and mainnet) |
 | SDK | `soroban-sdk` 27.0.5 |
 | Rust | 1.97.1, target `wasm32v1-none` |
-| Token interface | SEP-41 (USDC on Stellar has **7 decimals**) |
-| Contract size | ~47 KB |
+| Token interface | SEP-41 (USDC on Stellar has **7 decimals**); see [token assumptions](docs/ABI.md#token-assumptions) — no fee-on-transfer, no rebasing |
+| Contract size | ~74 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
+| Contract size | 75,159 bytes; enforced by `contracts/stream/wasm-size-budget.env` (42.7% under the 128 KiB Soroban cap) |
+| Contract size | ~69 KiB baseline; enforced by `contracts/stream/wasm-size-budget.env` |
 | Tests | 146, including property tests and a pool invariant checked after every operation |
 
-> **Read [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) before relying on this.**
-> A green suite here does not mean TTL is solved — the archival *recovery* flow
-> is not yet proven against a live network. See §1 there, and the summary below.
+> **Read [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) before relying on this.**
+> The archival question that used to sit under §1 was answered against live
+> testnet on 2026-09-28. See §1 there, and the summary below.
+
+> **Security status:** Automated testing includes property tests, a pool
+> invariant checked after every operation, and randomized sequence tests. This
+> testing is not an independent security review; no third-party security audit
+> of the contracts has been performed.
 
 ---
 
@@ -28,11 +35,47 @@ subscription billing, vesting schedules. The contract is the product.
 ```bash
 cargo test                                    # full suite
 cargo test resource_limits -- --nocapture     # print measured resource costs
-cargo build --target wasm32v1-none --release  # build the contract
 
 # Deeper randomized sweep. CI runs this nightly; worth running before a release
 # or after touching accrual.rs. Both suites have found real bugs.
 FLUXORA_FUZZ_SEEDS=200 FLUXORA_FUZZ_STEPS=300 PROPTEST_CASES=5000 cargo test --release
+```
+
+## Building and releasing
+
+The **product** contract (`contracts/stream`) builds to `fluxora_stream.wasm`.
+
+**Release artifacts come from `script/release.sh` only.** It builds exactly the
+product package, downloads nothing else, and refuses to produce an artifact if the
+archival probe's wasm would be swept in:
+
+```bash
+script/release.sh      # -> target/wasm32v1-none/release/fluxora_stream.wasm (only)
+```
+
+> The archival probe (see below) is a workspace member so its smoke test stays
+> wired into `cargo test`, but it is deliberately excluded from release artifacts.
+> Never deploy it to mainnet. See
+> [`contracts/archival-probe/src/lib.rs`](contracts/archival-probe/src/lib.rs).
+
+**The full sequence — every script, the `deploy_target` input, who may trigger a
+mainnet deploy, and rollback — is in
+[docs/RELEASE.md](docs/RELEASE.md).** Follow that document end to end; the
+sections above are only the short version.
+
+---
+
+## Release integrity
+
+Every contract wasm is released with a provenance manifest tying its bytes to
+the git revision, Rust toolchain, soroban-sdk version, target triple and
+release profile, plus a SHA-256 digest per artifact (see
+[docs/provenance.md](docs/provenance.md)). Verification is mandatory — a
+mismatch fails the release:
+
+```bash
+script/provenance.sh build   # wasm build + generate + verify (the release gate)
+script/provenance.sh verify  # re-check the current build
 ```
 
 ---
@@ -60,15 +103,21 @@ answer "show me my streams" without the contract paying rent to remember.
 `test::resource_limits::cost_is_independent_of_how_many_streams_exist` states
 this as a test: the 153rd stream costs exactly what the 2nd did.
 
-### Immutable guarantees
+### Deliberately immutable
+
+The deployed stream contract is **not upgradeable in place**. It has no admin
+key and exposes no upgrade entry point; changing the implementation requires a
+new deployment at a new address. This is a deliberate trust property, not a
+missing operational procedure: a recipient's stream guarantees cannot later be
+changed by an administrator. See the [ABI reference](docs/ABI.md#upgrade-posture).
 
 `cancellable`, `pausable` and `transferable` are fixed at creation and can never
 change. Before accepting a stream a recipient can verify that the sender cannot
 claw it back, freeze it, or reassign it. A stream that could *become* cancellable
 later would be worthless as a guarantee.
 
-For the same reason there is no admin key, no upgrade path, no fee switch and no
-global pause. Immutability is what lets another protocol depend on this one.
+For the same reason there is no fee switch and no global pause. Immutability is
+what lets another protocol depend on this one.
 
 ---
 
@@ -96,6 +145,23 @@ contract can never owe more than it holds.
 entitled to everything accrued *since `start_time`* — not merely what accrues
 after the cliff. This is standard vesting semantics and it surprises people.
 
+**Which clock the cliff is judged on is a per-stream choice.** A stream carries
+a `cliff_mode`, fixed at creation:
+
+```
+cliff_mode = Schedule  (default)   gate opens when stream_time >= cliff_time
+cliff_mode = WallClock             gate opens when now        >= cliff_time
+```
+
+On the default `Schedule` mode a pause slides the cliff along with the schedule,
+so the gate opens at `cliff_time + paused_total`. That is the historical
+behaviour and it is what `create_stream` produces. `WallClock` judges the gate
+against the ledger timestamp instead, so a sender pausing the stream can no
+longer move the recipient's unlock instant — while accrual still stops while
+paused, so the pre-cliff backlog is released in one go on resume. Create one
+with `create_stream_with_cliff_mode(..., CliffMode::WallClock, ...)`; the mode is
+returned by `get_stream` and published in the `stream_created` event.
+
 **Conservation is exact.** For all `t`:
 
 ```
@@ -117,7 +183,7 @@ recipient can still withdraw while paused — pausing stops *accrual*, not acces
 Freezing earned funds would make pausable streams unacceptable to any serious
 recipient.
 
-A stream paused across its cliff does not silently pass the cliff while frozen.
+A stream paused across its cliff does not silently pass the cliff while frozen — on a `Schedule` stream the gate is pushed back by the paused time, and on a `WallClock` stream it is not, which is the whole point of the mode.
 
 ### Cancel
 
@@ -158,7 +224,7 @@ lowers the rate and therefore retroactively *reduces* the amount already vested 
 letting `withdrawn` exceed `vested`, and letting a subsequent `cancel` (which
 sets `deposited = vested`) drive liability negative and refund the sender money
 the recipient already holds. This was a real bug, caught by the randomized
-sequence suite; see [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) for the class of
+sequence suite; see [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) for the class of
 issue and `test::top_up::a_top_up_never_reduces_what_is_already_vested` for the
 regression. Rounding down guarantees `vested` never decreases; the residual is at
 most one second of schedule, in the recipient's favour.
@@ -178,18 +244,32 @@ a contract touching live state. Measured against protocol 27's real limits:
 |---|---|---|
 | total footprint (entries) | 43 | 400 |
 | write entries | 20 | 200 |
-| instructions | ~4.6M | 400M |
-| **contract event bytes** | **8,192** | **16,384** |
+| instructions | ~4.9M | 400M |
+| **contract event bytes** | **9,984** | **16,384** |
 
 Entry counts would allow well over a hundred streams per call. The **event
 budget** is what binds: each stream emits a `withdrawn` event plus the token
-contract's own `transfer` event, roughly 512 bytes between them, so the hard
-ceiling is about 32.
+contract's own `transfer` event, roughly 624 bytes between them, so the hard
+ceiling is about 26.
 
-Sixteen is that ceiling with a 2x safety factor. The margin matters because the
-per-stream event cost depends on the *token's* event payload — a token heavier
-than the Stellar Asset Contract used in tests would inflate it, and a cap that
-merely fits today would fail on somebody else's token.
+Sixteen is that ceiling with 6,400 bytes of event budget to spare. The margin
+matters because the per-stream event cost depends on the *token's* event
+payload — a token heavier than the Stellar Asset Contract used in tests would
+inflate it, and a cap that merely fits today would fail on somebody else's
+token. It was a 2x factor (8,192 bytes) until issue #1868 required every
+lifecycle event to name both parties; the `sender` appended to `withdrawn`,
+plus the pause bookkeeping that event now republishes, costs 112 bytes per
+stream — and `batch_withdraw` emits one `withdrawn` per stream while
+`MAX_BATCH_SIZE` is frozen ABI. Re-derive these numbers from
+`test::resource_limits` rather than adjusting them by feel.
+
+`batch_cancel` is the one batch call that does not clear 2x on the event budget:
+it measures 8 832 bytes at the cap (~552 per element) against the same 16 384
+ceiling, so its margin there is ~1.85x — enough for a heavier token, and the
+event budget alone would allow ~29 streams. Every other dimension (42 entries of
+footprint, 20 writes, ~4.9M instructions) keeps the full 2x margin. The cap is
+one number for all three batch calls, so the tightest one sets it; both
+measurements are pinned in `test::resource_limits`.
 
 Oversized batches are rejected with `BatchTooLarge` rather than failing opaquely
 at the network level. The SDK chunks client-side.
@@ -207,6 +287,11 @@ A `transferable: bool` flag alongside `cancellable` and `pausable`. A
 compliance-bound sender — payroll, a KYC'd grant program — can pin the payee at
 creation. Without it those senders simply could not use Fluxora.
 
+Transfer moves the stream's entire remaining claim. Funds already withdrawn
+stay with the old recipient; accrued but unwithdrawn funds and all future
+accrual belong to the new recipient. The transfer itself changes no schedule or
+accounting value, and only the new recipient may withdraw afterward.
+
 ---
 
 ## TTL, rent and archival
@@ -214,10 +299,14 @@ creation. Without it those senders simply could not use Fluxora.
 The hardest problem in the project, and the one existing implementations skip.
 
 Persistent entries have a time-to-live in ledgers. When it runs out the entry is
-archived and becomes unreadable until restored. A stream running twelve months
-outlives its initial TTL. If a stream entry archives, the **tokens are not lost**
-— they sit in the contract's pooled balance — but the accounting entry saying who
-they belong to is inaccessible until someone pays to restore it.
+archived. A stream running twelve months outlives its initial TTL. If a stream
+entry archives, the **tokens are not lost** — they sit in the contract's pooled
+balance — and the accounting entry saying who they belong to is still on the
+ledger; the rent that brings it back is paid by whichever invocation next touches
+it. On protocol 23 and later that happens automatically, inside that call: the
+archived entries named in the transaction's footprint are restored as part of it
+and the call proceeds. Measured on testnet — see
+[docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md).
 
 Three mechanisms:
 
@@ -232,29 +321,85 @@ Three mechanisms:
    the caller only ever *pays* rent, and TTL extension cannot move funds or
    change stream state.
 
+   **Exception: terminal streams (`Cancelled` and `Depleted`) are rejected.**
+   Both entry points return `Error::StreamTerminated` when called against a
+   settled stream. The floor TTL applied at the time of cancellation/depletion
+   covers any remaining withdrawal tail; after that, callers should use
+   `RestoreFootprint` rather than extending. Keepers should filter terminal ids
+   out of their sweep batches.
+
 Views deliberately do **not** extend TTL. They are called through simulation,
 where a footprint write is at best noise. Keeping a stream alive is the explicit
 job of `extend_stream_ttl`.
 
+### Retention policy by state
+
+Every touch tops the entry back up to one target — the stream's remaining
+effective life plus the 30-day buffer, inflated by a 20% close-time safety
+margin, floored at `MIN_STREAM_TTL_LEDGERS` (~30 days plus the margin) and
+clamped to the network's `max_entry_ttl`. The close time the conversion
+assumes is measured, not assumed, with the margin covering drift
+([`KNOWN-LIMITATIONS.md` §5](docs/KNOWN-LIMITATIONS.md)). The threshold equals
+the extend-to, so an entry below its target is topped back up to it in full —
+and one already funded past the target keeps its higher balance: rent is never
+clawed back, so a stream entering a terminal state decays toward its floor
+rather than dropping to it. State only changes what "remaining life" means:
+
+| State | Rent target on any touch | Why |
+|---|---|---|
+| `Active` | remaining effective life (schedule plus any accumulated pauses) + buffer | funded to its end plus the keeper's working window |
+| `Paused` | stretched end (schedule + accumulated and in-progress pauses) + buffer | a paused stream is not settled; its end slides forward in wall-clock terms |
+| `Cancelled` | the floor | cancel collapses the schedule onto "now", so remaining life is zero (a cancel before `start_time` still funds up to the unopened start); the floor keeps the vested tail withdrawable and the final state indexable |
+| `Depleted` | the floor | fully paid out is not the same as forgotten; the terminal record stays readable |
+
+The instance entry (the id counter) is always extended to the network maximum,
+whatever the streams are doing.
+
+Expired and missing records: an archived entry is restored by the invocation
+that touches it, so a stream that archives is not a failure the caller has to
+handle — see the caveat below. The contract itself answers an id it cannot see
+with `Error::StreamNotFound` (#1), which is now reachable only for ids that were
+never issued; a call that fails this way mutates nothing, and both halves of that
+contract-side story are pinned by deterministic assertions in `test::ttl`.
+Batch calls differ by design: `batch_withdraw` fails the whole batch with
+`StreamNotFound`, while `batch_extend_ttl` skips unknown ids so a keeper's
+sweep survives a stale index. Because a read restores an archived entry rather
+than failing, `stream_exists(id) == false` while `id < stream_count()` is
+**not** an "archived, not nonexistent" signal — the poll that would observe it is
+itself what restores the entry.
+[docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md) records the measurement
+that settled this.
+Expired and missing records: on a live network a transaction touching an
+archived entry fails **before** the contract executes and must be resubmitted
+with a `RestoreFootprint` (see the caveat below). The contract itself answers
+an id it cannot see with `Error::StreamNotFound` (#1), and a call that fails
+this way mutates nothing — both halves of that contract-side story are pinned
+by deterministic assertions in `test::ttl`. Batch calls differ by design:
+`batch_withdraw` fails the whole batch with `StreamNotFound`, while
+`batch_extend_ttl` skips unknown ids so a keeper's sweep survives a stale
+index, but fails the whole batch with `StreamTerminated` if any id belongs to
+a terminal (`Cancelled` or `Depleted`) stream. `stream_exists(id) == false`
+while `id < stream_count()` is the
+integrator's signal for "archived, not nonexistent"; whether that signal holds
+against a real RPC is exactly the stage-4 territory
+[KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) tracks.
+
 ### What the tests prove, and what they do not
 
-**This is the most important caveat in the project. Do not skip it.**
-
 The SDK's test host runs storage in recording mode, where reading an expired
-persistent entry is **silently auto-restored** rather than failing. So `test::ttl`
-proves the rent arithmetic, the extend-on-touch behaviour, that a year-long
-stream survives on keeper sweeps alone, and that crossing the archive/restore
-boundary preserves every field of the accounting with the pool still backing it.
+persistent entry is **silently auto-restored** rather than failing. That is what
+the live network does too — established on testnet on 2026-09-28, see §1 of
+[docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) — so `test::ttl` proves the
+rent arithmetic, the extend-on-touch behaviour, that a year-long stream survives
+on keeper sweeps alone, and that crossing the archive/restore boundary preserves
+every field of the accounting with the pool still backing it.
 
-It does **not** prove the recovery flow. On a real network the transaction
-*fails first* and the caller must resubmit with a `RestoreFootprint` operation —
-a step the test host skips entirely. Nothing here establishes that the failure is
-diagnosable, that the footprint we would build is correct, or what a restore
-costs.
-
-**TTL is therefore half-proven.** Closing the other half against live testnet is
-the acceptance criterion for stage 4, not a nice-to-have. Full detail and
-integrator guidance in [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md).
+What it does not measure is the **cost** of that restoration: the rent for
+everything an invocation resurrects is charged to that invocation, so an
+unexpectedly archived entry turns a cheap call into an expensive one. That is the
+argument for running a keeper against `batch_extend_ttl` rather than relying on
+the automatic path. The host-side limitation this section used to carry —
+that a real network might fail the read instead — did not materialise.
 
 ---
 
@@ -264,11 +409,15 @@ integrator guidance in [KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md).
 // Lifecycle
 create_stream(sender, recipient, token, deposit,
               start, end, cliff,
+              cancellable, pausable, transferable) -> u64   // sender auth; cliff_mode = Schedule
+create_stream_with_cliff_mode(sender, recipient, token, deposit,
+              start, end, cliff, cliff_mode,
               cancellable, pausable, transferable) -> u64   // sender auth
 top_up(stream_id, amount)                                   // sender auth
 withdraw(stream_id, amount: Option<i128>) -> i128           // recipient auth; None = max
 batch_withdraw(recipient, stream_ids) -> i128               // recipient auth
 cancel(stream_id)                                           // sender auth
+batch_cancel(sender, stream_ids) -> BatchCancelOutcome      // sender auth
 pause(stream_id) / resume(stream_id)                        // sender auth
 transfer_recipient(stream_id, new_recipient)                // recipient auth
 
@@ -322,6 +471,30 @@ storage, no host calls. That keeps the interesting arithmetic in one auditable
 place and makes the vesting model property-testable without a Soroban host, so a
 case costs microseconds instead of a host invocation.
 
+### The archival probe: a deliberate exception
+
+`contracts/archival-probe/` is a **throwaway** contract, not part of the product.
+Its entire purpose was to answer the one question the unit suite structurally
+cannot — what a live network does when an invocation touches an archived
+persistent entry. It answered it on testnet on 2026-09-28 (see
+[docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md) and
+[`script/archival-canary.sh`](script/archival-canary.sh)), and the canary is now
+retired. It writes a persistent entry and deliberately never extends its TTL, so
+it archives on the network's minimum schedule. For what the harness asserts, and
+how to read it, see the [archival canary runbook](docs/archival-canary.md).
+
+It remains a **workspace member** — so `cargo test --workspace`, `cargo fmt --all`
+and `cargo clippy --all-targets` keep covering its smoke test — but it is
+**explicitly excluded from release artifacts**: `script/release.sh` builds only the
+`fluxora-stream` package and rejects a probe wasm among its outputs. To build the
+probe on its own, use the explicit command:
+
+```bash
+cargo build -p fluxora-archival-probe --target wasm32v1-none --release
+```
+
+This is the documented design decision for issue #1543.
+
 ---
 
 ## Non-goals for v1
@@ -343,12 +516,12 @@ and passes 35/35 assertions.
 
 Its acceptance criterion — the live archival restore round trip — is **not yet
 met**. A canary entry was planted on 2026-08-12 and archives ~2026-08-19; see
-[KNOWN-LIMITATIONS.md §1](KNOWN-LIMITATIONS.md) and
+[docs/KNOWN-LIMITATIONS.md §1](docs/KNOWN-LIMITATIONS.md) and
 `script/archival-canary.sh`.
 
 Then the indexer, keeper and TypeScript SDK (stage 5), reference UI last (stage 6).
 
-Migrating from the pre-rewrite contract? See [MIGRATION.md](MIGRATION.md) — the
+Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.md) — the
 frontend's four contract calls all break, the backend is unaffected.
 
 ## Documents
@@ -356,11 +529,21 @@ frontend's four contract calls all break, the backend is unaffected.
 | | |
 |---|---|
 | [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
-| [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
-| [MIGRATION.md](MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
+| [docs/archival-canary.md](docs/archival-canary.md) | Archival canary cadence, signal interpretation, and operator response. |
+| [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
+| [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
 | [docs/soroban-rpc-read-skew.md](docs/soroban-rpc-read-skew.md) | Pin multi-call reads to one ledger, and the read-after-write barrier. |
-| [fluxora-build-spec.md](fluxora-build-spec.md) | The build spec, with amendments where measurement contradicted it. |
+| [docs/provenance.md](docs/provenance.md) | Wasm provenance schema, design decisions, and the release gate. |
+| [docs/RELEASE.md](docs/RELEASE.md) | **Release runbook.** Script roles, workflow inputs, deploy authorisation, rollback. |
+| [docs/terminal-operations.md](docs/terminal-operations.md) | Terminal (`Cancelled`/`Depleted`) behaviour and the rejection matrix. |
+| [docs/cliff-test-scenarios.md](docs/cliff-test-scenarios.md) | Cliff boundary test scenarios and expected values. |
+| [docs/factory-admin-rotation-tests.md](docs/factory-admin-rotation-tests.md) | Same-ledger admin rotation coverage for the factory. |
+| [docs/same-ledger-ordering.md](docs/same-ledger-ordering.md) | **Ordering model.** What is guaranteed when two calls share a ledger, and the pairs it affects. |
+| [docs/delegation-revocation.md](docs/delegation-revocation.md) | Delegate revocation takes effect immediately; grant/revoke ordering and recipient-transfer behaviour. |
+| [docs/archive/](docs/archive/README.md) | Point-in-time reports and the original build spec, kept for provenance. |
 
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a
 > protocol-27 network.
+
+....

@@ -3,8 +3,40 @@ use soroban_sdk::contracterror;
 /// Every failure mode in Fluxora is a typed error. Nothing panics on a numeric
 /// edge case: all arithmetic is checked and maps to [`Error::Overflow`].
 ///
+/// Zero-amount policy: zero or negative deposit, top-up, and explicit
+/// withdrawal amounts are errors, not no-ops. No zero-value event is emitted
+/// for a rejected operation, and balances are conserved.
+///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append.
+///
+/// ## Creation atomicity
+/// Stream creation is transactional: `next_stream_id` and `stream_count` are
+/// only mutated after all validation and the token transfer succeed. If any
+/// phase fails, no ID is consumed and no count is incremented; stream IDs are
+/// therefore contiguous with no gaps.
+///
+/// ## Terminal stream statuses
+/// A stream reaches a terminal status when no further accrual or state change
+/// is possible. Two distinct terminal statuses exist, and callers must be able
+/// to tell them apart because they mean different things for retry logic:
+///
+/// - [`Error::StreamTerminated`] (discriminant 14) — the stream ended *early*.
+///   It is reached when the sender `cancel`s the stream (`Cancelled`) or when
+///   the recipient withdraws the exact withdrawable balance and the stream
+///   becomes `Depleted`. Both are permanent: the stream can never accrue or be
+///   resumed again.
+/// - [`Error::StreamMatured`] (discriminant 15) — the stream ended *naturally*.
+///   It is reached when the accrual clock has passed `end_time` and the full
+///   deposit has vested. This is also permanent, but it signals successful
+///   completion rather than an early stop.
+///
+/// Both terminal statuses are permanent, so a caller retrying a mutating
+/// operation must not retry blindly: it should branch on which variant was
+/// returned to distinguish an early stop from a natural completion.
+///
+/// [`StreamStatus::is_terminal`] covers exactly these two statuses
+/// (discriminants 14 and 15) and nothing else.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -16,7 +48,7 @@ pub enum Error {
     // --- Creation validation ---
     /// `end_time <= start_time`. A zero or negative duration would divide by zero.
     InvalidTimeRange = 2,
-    /// `cliff_time` is outside `[start_time, end_time]`.
+    /// `cliff_time` is outside [start_time, end_time].
     InvalidCliff = 3,
     /// Deposit is zero or negative.
     InvalidDeposit = 4,
@@ -25,6 +57,8 @@ pub enum Error {
     DepositRateTooLow = 5,
     /// Sender and recipient are the same address.
     SelfStream = 6,
+    /// Reference string exceeds maximum allowed length.
+    InvalidReferenceLength = 40,
 
     // --- Authorization / capability ---
     /// Caller is not the party allowed to perform this action.
@@ -38,22 +72,44 @@ pub enum Error {
 
     // --- State machine ---
     /// Action requires an `Active` stream.
+    ///
+    /// Reserved in the frozen ABI; current entry points use the more specific
+    /// [`Self::StreamNotPaused`] / [`Self::StreamAlreadyPaused`] /
+    /// [`Self::StreamTerminated`] variants instead. Do not renumber.
     StreamNotActive = 11,
     /// `resume` called on a stream that is not `Paused`.
     StreamNotPaused = 12,
     /// `pause` called on a stream that is already `Paused`.
     StreamAlreadyPaused = 13,
-    /// Action attempted on a `Cancelled` or `Depleted` stream.
+    /// Action attempted on a stream that ended early: a `Cancelled` stream, or
+    /// a `Depleted` stream (the recipient withdrew the exact withdrawable
+    /// balance).
+    ///
+    /// This is a *terminal* status: the stream can never accrue or be resumed
+    /// again, so the error is permanent. It is distinguishable from
+    /// [`Self::StreamMatured`], which signals natural completion rather than an
+    /// early stop. Callers retrying a mutating operation must branch on which
+    /// of the two terminal variants was returned.
     StreamTerminated = 14,
     /// `top_up` on a stream whose accrual clock has already reached `end_time`.
     /// Topping up a matured stream would make the new funds instantly
     /// withdrawable; create a new stream instead.
+    ///
+    /// This is a *terminal* status: the stream completed naturally and the
+    /// full deposit has vested. Like [`Self::StreamTerminated`] it is
+    /// permanent, but it signals successful completion rather than an early
+    /// stop, so callers must be able to tell the two apart.
     StreamMatured = 15,
 
     // --- Withdrawal ---
-    /// Requested amount exceeds the currently withdrawable balance.
+    /// Explicit amount exceeds a positive withdrawable balance. Returned only
+    /// when the available balance is non-zero; a zero balance returns
+    /// [`Self::NothingToWithdraw`] instead, regardless of the requested amount.
     InsufficientWithdrawable = 16,
-    /// Withdrawable balance is zero.
+    /// Withdrawable balance is zero on a live stream. Returned for both
+    /// `None` and explicit amounts; the zero check runs before amount
+    /// comparison, so it takes precedence over
+    /// [`Self::InsufficientWithdrawable`].
     NothingToWithdraw = 17,
     /// Explicit withdraw amount was zero or negative.
     InvalidAmount = 18,
@@ -63,14 +119,167 @@ pub enum Error {
     BatchTooLarge = 19,
     /// Batch contained no stream ids.
     EmptyBatch = 20,
-    /// A batch referenced the same stream id more than once.
+    /// A Batch referenced the same stream id more than once.
     DuplicateStreamId = 21,
 
     // --- Arithmetic ---
-    /// A checked arithmetic operation overflowed or underflowed.
+    /// A Checked arithmetic operation overflowed or underflowed.
     Overflow = 22,
-    /// `top_up` amount is smaller than one second of streaming at the current
-    /// rate, so it cannot extend the duration at all and would instead vest
-    /// retroactively. Top up by at least `deposited / duration`.
+    /// A positive `top_up` amount is smaller than one second of streaming at
+    /// the current rate, so it cannot extend the duration at all and would
+    /// instead vest retroactively. Top up by at least `deposited / duration`.
+    /// Zero or negative amounts return [`Self::InvalidTopUp`].
     TopUpTooSmall = 23,
+
+    // --- Identifier exhaustion ---
+    /// The stream-id counter has reached `u64::MAX`; no further ids can be
+    /// handed out. Ids are monotonic and never reused, so the counter never
+    /// wraps — this error is terminal for new-stream creation.
+    StreamIdExhausted = 24,
+
+    // --- Token sub-invocation ---
+    /// The token contract rejected the transfer (e.g. insufficient balance in
+    /// the pool on a payout, insufficient sender balance on a deposit, or the
+    /// token contract's own authorization rules refused the call).
+    ///
+    /// When this occurs while creating a stream, no stream ID was allocated
+    /// and `stream_count` is unchanged.
+    ///
+    /// The token contract's internal error discriminant is **intentionally
+    /// discarded** here. Forwarding it would produce a value that clients
+    /// decode against Fluxora's own error table, yielding a silent
+    /// misinterpretation. The raw diagnostic is visible on chain in the failed
+    /// transaction's `diagnosticEvents`; this variant is what a stream client
+    /// should match on.
+    TokenTransferFailed = 25,
+
+    /// The address stored as the stream's token does not resolve to a deployed
+    /// contract. This indicates a misconfigured stream; no funds have moved.
+    ///
+    /// Surfaces when the token sub-invocation fails with an `Abort` (host
+    /// trap) rather than a typed contract error, which is what the host
+    /// produces when the callee contract does not exist.
+    ///
+    /// Reserved for real WASM execution: the native test host types every
+    /// sub-invocation failure as a contract error, so this collapses into
+    /// [`Self::TokenTransferFailed`] there and cannot be produced by a test.
+    /// Classified as reserved in `test::error_reachability`.
+    TokenMissing = 26,
+
+    // --- Delegation ---
+    /// The delegate grant does not permit this operation on this stream.
+    DelegateNotPermitted = 27,
+    /// The delegate grant has passed its `expires_at` timestamp.
+    DelegateExpired = 28,
+
+    // --- Batch validation ---
+    /// A serialized vector element of a batch is not a `u64`.
+    ///
+    /// Defence in depth against a raw XDR caller. The typed client argument
+    /// is `Vec<u64>`, so the host rejects a non-`u64` element before this body
+    /// runs; no well-typed public call can reach it. Classified as reserved in
+    /// `test::error_reachability`.
+    MalformedStreamId = 29,
+
+    // --- Transfer ---
+    /// `transfer_recipient` to the current recipient.
+    RepeatedTransfer = 30,
+
+    // --- Arithmetic (top-up) ---
+    /// Zero or negative `top_up` amount.
+    ///
+    /// Superseded by [`Self::InvalidAmount`]: `top_up` rejects
+    /// `amount <= 0` as `InvalidAmount` before any schedule arithmetic runs,
+    /// so no entry point emits 31. Frozen ABI — do not renumber. Classified as
+    /// reserved in `test::error_reachability`.
+    InvalidTopUp = 31,
+
+    // --- Token assumptions ---
+    /// A deposit-side pull (`create_stream`, `top_up`, `delegate_top_up`)
+    /// delivered a different amount than requested.
+    ///
+    /// The contract measures its own token balance before and after the pull
+    /// and requires the delta to equal the requested amount exactly. This is
+    /// how a fee-on-transfer or balance-adjusting token is detected and
+    /// rejected on the deposit leg — see `docs/ABI.md` "Token assumptions"
+    /// for the full statement of what a stream's token is assumed to do, and
+    /// what happens when an assumption cannot be checked at call time (a
+    /// rebasing token).
+    TokenAmountMismatch = 32,
+    // --- Monotonicity ---
+    /// An operation would cause the vested amount to decrease.
+    ///
+    /// A defensive guard on `pause`, `resume`, `top_up` and
+    /// `transfer_recipient`. `vested` is non-decreasing under every mutation
+    /// those four paths can make — pause/resume leave elapsed time unchanged,
+    /// `top_up` scales numerator and denominator together, and the recipient
+    /// is not an input to the formula — so no reachable call produces it.
+    /// The guard stays because the invariant it protects is load-bearing.
+    /// Classified as reserved in `test::error_reachability`.
+    VestedDecreased = 33,
+
+    // --- Rebase detection ---
+    /// The pool's real token balance is short of the balance Fluxora has
+    /// accounted for.
+    ///
+    /// Fluxora keeps a per-token running total of the balance it expects to
+    /// hold ([`DataKey::PooledBalance`]) — every pull credits it, every
+    /// payout and refund debits it — and reconciles that total against the
+    /// token's own `balance` at the end of every operation that moves pool
+    /// funds. A shortfall means the token changed balances outside a
+    /// transfer Fluxora was a party to: an elastic-supply rebase, the exact
+    /// case `docs/KNOWN-LIMITATIONS.md` §6 recorded as undetectable. The
+    /// invocation reverts instead of letting one recipient be paid out of
+    /// another's claim.
+    ///
+    /// A **surplus** is deliberately tolerated, never reported: a positive
+    /// rebase cannot cause an underpayment, and rejecting one would let any
+    /// third party freeze every withdrawal by dusting the contract with a
+    /// single unit. See `docs/ABI.md` "Token assumptions" and
+    /// `test::rebase_drift`.
+    PoolBalanceDrift = 39,
+    // --- Contract-level emergency halt (#1818) ---
+    /// A state-changing entry point was called while the contract-level halt
+    /// is engaged.
+    ///
+    /// Only mutations are refused: every read method (`get_stream`,
+    /// `vested_of`, `withdrawable_of`, `refundable_of`, `stream_count`,
+    /// `stream_exists`, `halted`, `halt_operator`) keeps answering normally so
+    /// integrators can still observe the chain during an incident.
+    ContractHalted = 34,
+    /// `set_halt_operator` was called after an operator was already installed.
+    ///
+    /// The setter is deliberately one-shot: there is no rotation entry point,
+    /// so a compromised operator cannot be replaced — it can only be halted by
+    /// deploying a new contract.
+    HaltOperatorAlreadySet = 35,
+    /// `halt` or `resume_contract` was called on a contract that has never had
+    /// a halt operator installed.
+    ///
+    /// The halt is opt-in: a deployment that never calls `set_halt_operator`
+    /// has no operator and no way to engage it.
+    HaltOperatorNotSet = 36,
+    /// `halt` was called while the contract was already halted.
+    ContractAlreadyHalted = 37,
+    /// `resume_contract` was called while the contract was not halted.
+    ///
+    /// There is no timeout on the halt, so this is the only way a resume can
+    /// be a no-op.
+    ContractNotHalted = 38,
+
+    // --- Factory policy ---
+    /// `create_stream_via_factory` was called while the factory's creation
+    /// pause is engaged. The factory admin must unpause before new
+    /// factory-routed streams are accepted.
+    FactoryPaused = 41,
+    /// The deposit exceeds the factory's configured `max_deposit` cap.
+    DepositExceedsCap = 42,
+    /// The stream duration is shorter than the factory's `min_duration` floor.
+    DurationBelowMinimum = 43,
+    /// The token is not on the factory's allowlist.
+    TokenNotAllowlisted = 44,
+    /// The per-second rate is below the factory's `min_rate_per_second` bound.
+    RateBelowMin = 45,
+    /// The per-second rate exceeds the factory's `max_rate_per_second` bound.
+    RateAboveMax = 46,
 }

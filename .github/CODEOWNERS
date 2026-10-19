@@ -1,0 +1,17 @@
+# Workflow changes must be reviewed by the workflow maintainer before merge.
+.github/workflows/ @Johnsource-hub/maintainers
+
+# The doc-alignment baseline is a shrink-only ratchet: adding an entry lets a
+# documentation gap persist, so baseline edits require maintainer review.
+/script/doc-alignment-baseline.json @Johnsource-hub/maintainers
+
+# The entry-point cost baseline is the record the gas gate enforces against, so
+# raising a figure must be a deliberate, maintainer-reviewed edit rather than a
+# silent reset of the regression limit (see docs/entrypoint-costs.md).
+/contracts/stream/entrypoint-cost-baseline.json @Johnsource-hub/maintainers
+
+# Every crate's coverage floor is a ratchet: lowering one to make a red run
+# green would silently accept the regression, so floor edits require maintainer
+# review. A raise is fine and expected; a drop needs a reason (see
+# docs/test-coverage.md).
+**/coverage-floor.txt @Johnsource-hub/maintainers

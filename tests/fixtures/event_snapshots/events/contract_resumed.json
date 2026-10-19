@@ -1,0 +1,21 @@
+{
+  "event": "ContractResumed",
+  "topic": "contract_resumed",
+  "fields": [
+    {
+      "name": "operator",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "resumed_at",
+      "type": "u64",
+      "topic": false
+    },
+    {
+      "name": "halted_for",
+      "type": "u64",
+      "topic": false
+    }
+  ]
+}

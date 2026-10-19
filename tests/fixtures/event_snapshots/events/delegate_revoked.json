@@ -1,0 +1,21 @@
+{
+  "event": "DelegateRevoked",
+  "topic": "delegate_revoked",
+  "fields": [
+    {
+      "name": "stream_id",
+      "type": "u64",
+      "topic": true
+    },
+    {
+      "name": "grantor",
+      "type": "Address",
+      "topic": true
+    },
+    {
+      "name": "delegate",
+      "type": "Address",
+      "topic": true
+    }
+  ]
+}
