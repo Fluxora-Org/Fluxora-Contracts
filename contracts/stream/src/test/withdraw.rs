@@ -1,5 +1,7 @@
 //! Stage 1 — `withdraw`: linear accrual, partial draws, boundaries, depletion.
 
+//! Stage 1 — `withdraw`: linear accrual, partial draws, boundaries, depletion.
+
 use super::common::*;
 use crate::{Error, StreamStatus};
 
@@ -72,6 +74,32 @@ fn withdraw_max_transfers_everything_accrued() {
 }
 
 #[test]
+fn final_withdrawal_after_end_time_releases_exactly_the_remaining_balance() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(40 * DAY);
+    assert_eq!(h.client.withdraw(&id, &Some(300 * ONE)), 300 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 100 * ONE);
+    assert_eq!(h.balance(&h.recipient), 300 * ONE);
+    assert_eq!(h.pool(), 700 * ONE);
+
+    h.warp_to(T0 + 100 * DAY);
+
+    let remaining = h.client.withdrawable_of(&id);
+    assert_eq!(remaining, 700 * ONE);
+
+    let paid = h.client.withdraw(&id, &None);
+    assert_eq!(paid, 700 * ONE);
+    assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
+    assert_eq!(h.pool(), 0);
+    assert_eq!(h.get(id).withdrawn, 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    h.assert_pool_exact();
+}
+
+#[test]
 fn partial_withdrawals_leave_the_remainder_claimable() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
@@ -122,6 +150,89 @@ fn requesting_more_than_available_is_rejected() {
     // The failed attempt changed nothing.
     assert_eq!(h.get(id).withdrawn, 0);
     assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
+
+// --- Numeric boundary pinning --------------------------------------------
+
+/// Zero and one are the two smallest accepted amounts and must both be
+/// honoured exactly: zero is refused with `InvalidAmount`, one is paid out.
+#[test]
+fn withdraw_zero_and_one_are_pinned() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let err = h.client.try_withdraw(&id, &Some(0)).unwrap_err().unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+    assert_eq!(h.get(id).withdrawn, 0);
+
+    assert_eq!(h.client.withdraw(&id, &Some(1)), 1);
+    assert_eq!(h.get(id).withdrawn, 1);
+    assert_eq!(h.balance(&h.recipient), 1);
+    h.assert_pool_exact();
+}
+
+/// The maximum accepted value is exactly the withdrawable balance; it must
+/// succeed and drain the stream.
+#[test]
+fn withdraw_max_accepted_value_succeeds() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let available = h.client.withdrawable_of(&id);
+    assert!(available > 0);
+
+    let paid = h.client.withdraw(&id, &Some(available));
+    assert_eq!(paid, available);
+    assert_eq!(h.get(id).withdrawn, available);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+    assert_eq!(h.balance(&h.recipient), available);
+    h.assert_pool_exact();
+}
+
+/// One past the maximum accepted value must be refused with the documented
+/// error and leave state untouched.
+#[test]
+fn withdraw_one_past_max_is_refused_with_typed_error() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(30 * DAY);
+
+    let available = h.client.withdrawable_of(&id);
+    assert!(available > 0);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(available + 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+
+    assert_eq!(h.get(id).withdrawn, 0);
+    assert_eq!(h.balance(&h.recipient), 0);
+    h.assert_pool_exact();
+}
+
+/// The absolute maximum accepted value for the whole deposit is the deposit
+/// itself; requesting it at end time succeeds, and one past it is refused.
+#[test]
+fn withdraw_deposit_max_and_one_past_are_pinned() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.warp_to(T0 + 100 * DAY);
+
+    let err = h
+        .client
+        .try_withdraw(&id, &Some(1_000 * ONE + 1))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InsufficientWithdrawable);
+    assert_eq!(h.get(id).withdrawn, 0);
+
+    assert_eq!(h.client.withdraw(&id, &Some(1_000 * ONE)), 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
     h.assert_pool_exact();
 }
 
