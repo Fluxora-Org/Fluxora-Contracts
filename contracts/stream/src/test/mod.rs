@@ -1,14 +1,14 @@
 //! Test suite, staged to match the build order.
 //!
-// * **Stage 1** — data model, create, withdraw, views, plus the two tests that
-//   gate everything else: the accrual property suite and the pool invariant.
-// * **Stage 2*** — cliff, cancel, pause/resume, top-up, recipient transfer, and
-//   every adversarial boundary case.
-// * **Stage 3** — TTL survival and archival recovery, resource consumption at
-//   the batch cap.
-// * **Stage 4*** — the stream id invariant: unique, strictly monotonic, and
-//   never consumed or reused by a failed create, independent of fixture
-//   order.
+//! * **Stage 1** — data model, create, withdraw, views, plus the two tests that
+//!   gate everything else: the accrual property suite and the pool invariant.
+//! * **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
+//!   every adversarial boundary case.
+//! * **Stage 3** — TTL survival and archival recovery, resource consumption at
+//!   the batch cap.
+//! * **Stage 4** — the stream id invariant: unique, strictly monotonic, and
+//!   never consumed or reused by a failed create, independent of fixture
+//!   order.
 
 mod common;
 mod events;
@@ -37,19 +37,15 @@ mod create;
 mod props;
 mod reference;
 mod withdraw;
+// Issue — boundary behaviour of `withdraw`: zero, one, the maximum accepted
+// value, and one past it, each pinned to a typed error or success.
+mod withdraw_boundaries;
 // Issue #1583: withdrawal return value matches emitted amounts.
 mod withdraw_events;
 // Issue #1839: withdrawing exactly the full withdrawable amount — the boundary
 // where `withdrawable` reaches zero and the follow-up error changes from
 // `NothingToWithdraw` to `StreamTerminated`.
 mod withdraw_exact_balance;
- fix/issue-2031-pin-the-boundary-behaviour-of-withdraw
-// Issue #1900 — the `withdraw` boundary matrix: zero, one, the maximum
-// accepted value, and one past it, each pinned to a typed error or a
-// successful settlement with no panic.
-mod withdraw_boundaries;
-
- main
 mod settled_dust;
 
 // Stage 2
@@ -154,22 +150,13 @@ mod read_ttl_matrix;
 
 // Issue #1828 — `delegate_withdraw` coverage at parity with the direct path.
 mod delegate_withdraw;
- fix/issue-2031-pin-the-boundary-behaviour-of-withdraw
-// Issue #1804 — MAX_BATCH_SIZE calibrated against more than one token
-
 // Issue #1804 — `MAX_BATCH_SIZE` calibrated against more than one token
-main
 // implementation.
 mod token_batch_calibration;
 // Issue #1835 — a recipient transfer in the same ledger as a withdrawal.
 mod transfer_withdraw_same_ledger;
-fix/issue-2031-pin-the-boundary-behaviour-of-withdraw
-// Issue — top_up changes deposited/end_time; withdraw reads vested from
-// the same storage. Both orderings in the same ledger are covered and shown to
-
 // Issue — top_up changes deposited/end_time; withdraw reads vested from the
 // same storage. Both orderings in the same ledger are covered and shown to
- main
 // be conservation-equivalent (rate-preserving property of top_up).
 mod top_up_withdraw_same_ledger;
 // Issue #1857 — the contract's token balance always covers the summed live
