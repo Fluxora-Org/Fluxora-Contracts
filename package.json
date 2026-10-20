@@ -4,6 +4,7 @@
   "private": true,
   "description": "Fluxora — continuous payment streaming contracts for Soroban. Lint task runners for Rust clippy/fmt with changed-files fast-path and regression baseline.",
   "scripts": {
+    "test:lint": "node --test scripts/tests/*.test.mjs",
     "lint:ci": "node scripts/lint-changed-files.mjs",
     "lint:changed": "node scripts/lint-changed-files.mjs",
     "lint:full": "node scripts/lint-full-with-baseline.mjs",

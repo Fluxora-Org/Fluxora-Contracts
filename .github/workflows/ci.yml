@@ -242,6 +242,9 @@ jobs:
       - name: Enable corepack (pnpm)
         run: corepack enable && corepack prepare pnpm@9 --activate
 
+      - name: Lint runner regression tests
+        run: pnpm test:lint
+
       - name: Verify Rust toolchain version
         if: ${{ hashFiles('script/verify_rust_version.py') != '' }}
         run: python3 script/verify_rust_version.py
