@@ -318,11 +318,12 @@ fn not_a_test() {}
             sys.argv = old_argv
         assert result == 0
 
-    def test_check_snapshot_diff_main_no_base(self):
-        """An invalid Git ref produces no changed snapshot files."""
+    def test_check_snapshot_diff_rejects_invalid_base(self):
+        """An invalid Git ref must not be reported as an empty diff."""
         mod = _import_script("check_snapshot_diff.py")
         assert mod is not None
-        assert mod.get_changed_files("HEAD~99999") == []
+        with pytest.raises(mod.SnapshotReadError, match="git diff failed"):
+            mod.get_changed_files("HEAD~99999")
 
     def test_check_snapshot_diff_main_real(self):
         """Exercise main() with a valid base ref."""

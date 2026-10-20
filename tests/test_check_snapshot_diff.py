@@ -11,7 +11,8 @@ in the CI pipeline.  It:
     working tree).
   - Recursively walks the JSON diff and flags any path that contains a member
     of ``SECURITY_FIELDS`` (auth, events, error, storage, etc.).
-  - Exits 0 when no security-relevant change is detected, 1 otherwise.
+  - Exits 0 when no security-relevant change is detected, 1 for a flagged
+    change, and 2 when Git or file reads cannot complete the comparison.
 
 Coverage targets
 ----------------
@@ -231,9 +232,10 @@ class TestGetChangedFiles:
             "contracts/stream/test_snapshots/b.json",
         ]
         mock_co.assert_called_once_with(
-            ['git', 'diff', '--name-only', 'HEAD~1', 'HEAD'],
+            ['git', 'diff', '--name-only', 'HEAD~1', 'HEAD', '--'],
             cwd=check_snapshot_diff.REPO_ROOT,
             text=False,
+            stderr=subprocess.PIPE,
         )
 
     @patch('subprocess.check_output')
@@ -242,9 +244,10 @@ class TestGetChangedFiles:
         files = check_snapshot_diff.get_changed_files("origin/main", None)
         assert files == ["contracts/stream/test_snapshots/c.json"]
         mock_co.assert_called_once_with(
-            ['git', 'diff', '--name-only', 'origin/main'],
+            ['git', 'diff', '--name-only', 'origin/main', '--'],
             cwd=check_snapshot_diff.REPO_ROOT,
             text=False,
+            stderr=subprocess.PIPE,
         )
 
     @patch('subprocess.check_output')
@@ -264,9 +267,10 @@ class TestGetChangedFiles:
         assert files == ["contracts/stream/test_snapshots/test.json"]
 
     @patch('subprocess.check_output')
-    def test_git_error_returns_empty_list(self, mock_co):
+    def test_git_error_is_not_an_empty_diff(self, mock_co):
         mock_co.side_effect = subprocess.CalledProcessError(128, 'git')
-        assert check_snapshot_diff.get_changed_files("HEAD~1", "HEAD") == []
+        with pytest.raises(check_snapshot_diff.SnapshotReadError):
+            check_snapshot_diff.get_changed_files("HEAD~1", "HEAD")
 
     @patch('subprocess.check_output')
     def test_empty_output_returns_empty_list(self, mock_co):
@@ -283,15 +287,37 @@ class TestGetFileContent:
 
     @patch('subprocess.check_output')
     def test_reads_from_git_with_commit(self, mock_co):
-        mock_co.return_value = b'{"key": "value"}'
+        mock_co.side_effect = [b'path/to/file.json\0', b'{"key": "value"}']
         content = check_snapshot_diff.get_file_content("abc123", "path/to/file.json")
         assert content == '{"key": "value"}'
-        mock_co.assert_called_once_with(['git', 'show', 'abc123:path/to/file.json'])
+        mock_co.assert_has_calls([
+            call(['git', 'ls-tree', '--name-only', '-z', 'abc123', '--', 'path/to/file.json'],
+                 cwd=check_snapshot_diff.REPO_ROOT, text=False, stderr=subprocess.PIPE),
+            call(['git', 'show', 'abc123:path/to/file.json'],
+                 cwd=check_snapshot_diff.REPO_ROOT, text=False, stderr=subprocess.PIPE),
+        ])
+
+    @patch('subprocess.check_output', return_value=b'')
+    def test_missing_tree_entry_returns_none(self, mock_co):
+        assert check_snapshot_diff.get_file_content('HEAD', 'missing.json') is None
+        assert mock_co.call_count == 1
 
     @patch('subprocess.check_output')
-    def test_git_error_returns_none(self, mock_co):
+    def test_blob_read_failure_is_reported(self, mock_co):
+        mock_co.side_effect = [b'snapshot.json\0', subprocess.CalledProcessError(128, 'git')]
+        with pytest.raises(check_snapshot_diff.SnapshotReadError, match='git show failed'):
+            check_snapshot_diff.get_file_content('HEAD', 'snapshot.json')
+
+    @patch('subprocess.check_output', side_effect=FileNotFoundError('git unavailable'))
+    def test_missing_git_is_reported(self, mock_co):
+        with pytest.raises(check_snapshot_diff.SnapshotReadError, match='git unavailable'):
+            check_snapshot_diff.get_file_content('HEAD', 'snapshot.json')
+
+    @patch('subprocess.check_output')
+    def test_git_error_is_not_a_missing_file(self, mock_co):
         mock_co.side_effect = subprocess.CalledProcessError(128, 'git')
-        assert check_snapshot_diff.get_file_content("HEAD", "missing.json") is None
+        with pytest.raises(check_snapshot_diff.SnapshotReadError):
+            check_snapshot_diff.get_file_content("HEAD", "missing.json")
 
     @patch('check_snapshot_diff.Path.exists', return_value=True)
     @patch('check_snapshot_diff.Path.read_text', return_value='{"local": true}')
@@ -691,7 +717,8 @@ class TestMainEndToEndRealGitRepo:
         mutated['events'][0]['data']['recipient_amount'] = 8750000
         head_sha = _commit_snapshot(repo, self.SNAPSHOT_REL_PATH, mutated)
 
-        monkeypatch.chdir(repo)
+        # Invoke from outside the inspected checkout, as with an absolute script path.
+        monkeypatch.chdir(tmp_path.parent)
         monkeypatch.setattr(check_snapshot_diff, "REPO_ROOT", Path(repo))
         with patch('sys.argv', ['check_snapshot_diff.py', '--base', base_sha, '--head', head_sha]):
             exit_code = check_snapshot_diff.main()
@@ -700,6 +727,34 @@ class TestMainEndToEndRealGitRepo:
         out = capsys.readouterr().out
         assert 'Security-relevant fields changed' in out
         assert self.SNAPSHOT_REL_PATH in out
+
+    @pytest.mark.parametrize('invalid_side', ['base', 'head'])
+    def test_invalid_revision_fails_the_check(self, tmp_path, monkeypatch, capsys, invalid_side):
+        self._init_repo(tmp_path)
+        sha = _commit_snapshot(tmp_path, self.SNAPSHOT_REL_PATH, {'events': []})
+        monkeypatch.setattr(check_snapshot_diff, 'REPO_ROOT', tmp_path)
+        refs = {'base': sha, 'head': sha}
+        refs[invalid_side] = 'missing-snapshot-revision'
+        with patch('sys.argv', ['check_snapshot_diff.py', '--base', refs['base'], '--head', refs['head']]):
+            assert check_snapshot_diff.main() == 2
+        captured = capsys.readouterr()
+        assert 'missing-snapshot-revision' in captured.err
+        assert 'No snapshot JSON files changed' not in captured.out
+
+    @pytest.mark.parametrize('delete', [False, True])
+    def test_added_and_deleted_snapshots_still_require_review(self, tmp_path, monkeypatch, delete):
+        self._init_repo(tmp_path)
+        base = _commit_snapshot(tmp_path, 'README.json', {'initial': True})
+        added = _commit_snapshot(tmp_path, self.SNAPSHOT_REL_PATH, {'events': ['transfer']})
+        if delete:
+            base = added
+            (tmp_path / self.SNAPSHOT_REL_PATH).unlink()
+            _run_git(['add', '-A'], cwd=tmp_path)
+            _run_git(['commit', '-qm', 'delete snapshot'], cwd=tmp_path)
+        monkeypatch.chdir(tmp_path.parent)
+        monkeypatch.setattr(check_snapshot_diff, 'REPO_ROOT', tmp_path)
+        with patch('sys.argv', ['check_snapshot_diff.py', '--base', base, '--head', 'HEAD']):
+            assert check_snapshot_diff.main() == 1
 
     def test_non_security_change_across_real_commits_exits_0(
         self, tmp_path, monkeypatch, capsys
