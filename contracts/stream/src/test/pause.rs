@@ -1358,3 +1358,132 @@ fn pause_boundary_one_past_max_accepted_time() {
     );
     h.assert_pool_exact();
 }
+
+
+// --- Issue: pause coverage across every stream status ----------------------
+//
+// `pause` behaves differently depending on the status of the stream it
+// touches. These tests drive `pause` from each status (Active, Paused,
+// Cancelled, Matured) and assert the outcome as a value or a typed error.
+// A refused call must not mutate a terminal stream.
+
+/// Active → Paused: pausing an active stream succeeds and freezes the clock.
+#[test]
+fn pause_from_active_status_succeeds_and_freezes_clock() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(30 * DAY);
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    let vested_before = h.client.vested_of(&id);
+
+    h.client.pause(&id);
+
+    let s = h.get(id);
+    assert_eq!(s.status, StreamStatus::Paused);
+    assert_eq!(s.paused_at, Some(T0 + 30 * DAY));
+    assert_eq!(s.paused_total, 0);
+    assert_eq!(h.client.vested_of(&id), vested_before);
+
+    // Clock is frozen: further wall-clock time does not accrue.
+    h.advance(50 * DAY);
+    assert_eq!(h.client.vested_of(&id), vested_before);
+    h.assert_pool_exact();
+}
+
+/// Paused → Paused: a second pause is refused with `StreamAlreadyPaused` and
+/// must not move the freeze point or mutate the stream.
+#[test]
+fn pause_from_paused_status_is_rejected_without_mutation() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.advance(30 * DAY);
+    h.client.pause(&id);
+    let before = h.get(id);
+    assert_eq!(before.status, StreamStatus::Paused);
+
+    h.advance(20 * DAY);
+    let err = h.client.try_pause(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamAlreadyPaused);
+
+    let after = h.get(id);
+    assert_eq!(after.status, StreamStatus::Paused);
+    assert_eq!(after.paused_at, before.paused_at, "freeze point unchanged");
+    assert_eq!(after.paused_total, before.paused_total);
+    assert_eq!(after.withdrawn, before.withdrawn);
+    h.assert_pool_exact();
+}
+
+/// Cancelled → Cancelled: pausing a cancelled stream is refused with
+/// `StreamTerminated` and leaves the settled stream untouched.
+#[test]
+fn pause_from_cancelled_status_is_rejected_without_mutation() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let sender_before = h.balance(&h.sender);
+
+    h.advance(30 * DAY);
+    h.client.cancel(&id);
+    let before = h.get(id);
+    assert_eq!(before.status, StreamStatus::Cancelled);
+
+    let err = h.client.try_pause(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    let after = h.get(id);
+    assert_eq!(after.status, StreamStatus::Cancelled);
+    assert_eq!(after.paused_at, None, "no pause state on a terminal stream");
+    assert_eq!(after.paused_total, before.paused_total);
+    assert_eq!(after.withdrawn, before.withdrawn);
+    assert_eq!(h.balance(&h.sender), sender_before + 700 * ONE);
+    h.assert_pool_exact();
+}
+
+/// Matured → Matured: pausing a matured stream is accepted as a no-op. The
+/// stream stays fully vested and no accrual is affected by the pause.
+#[test]
+fn pause_from_matured_status_is_a_noop() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.warp_to(T0 + 150 * DAY);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    h.client.pause(&id);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    // Wall clock advances while paused — still fully vested, not more.
+    h.advance(50 * DAY);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    h.client.resume(&id);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+
+    assert_eq!(h.client.withdraw(&id, &None), 1_000 * ONE);
+    assert_eq!(h.get(id).status, StreamStatus::Depleted);
+    h.assert_pool_exact();
+}
+
+/// Depleted → Depleted: pausing a depleted stream is refused with
+/// `StreamTerminated` and leaves the terminal stream untouched.
+#[test]
+fn pause_from_depleted_status_is_rejected_without_mutation() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 10 * DAY);
+
+    h.advance(10 * DAY);
+    h.client.withdraw(&id, &None);
+    let before = h.get(id);
+    assert_eq!(before.status, StreamStatus::Depleted);
+
+    let err = h.client.try_pause(&id).unwrap_err().unwrap();
+    assert_eq!(err, Error::StreamTerminated);
+
+    let after = h.get(id);
+    assert_eq!(after.status, StreamStatus::Depleted);
+    assert_eq!(after.paused_at, None, "no pause state on a terminal stream");
+    assert_eq!(after.paused_total, before.paused_total);
+    assert_eq!(after.withdrawn, before.withdrawn);
+    h.assert_pool_exact();
+}
