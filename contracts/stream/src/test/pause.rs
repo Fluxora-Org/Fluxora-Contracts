@@ -1487,3 +1487,218 @@ fn pause_from_depleted_status_is_rejected_without_mutation() {
     assert_eq!(after.withdrawn, before.withdrawn);
     h.assert_pool_exact();
 }
+// ---------------------------------------------------------------------------
+// Double-pause: idempotency / rejection coverage
+//
+// A client that retries after a network timeout will call `pause` twice on a
+// stream that is already `Paused`. These three tests together cover the three
+// acceptance criteria:
+//
+//   (a) state is byte-for-byte identical after the rejected second call
+//   (b) token balances are unaffected by both calls
+//   (c) exactly one `Paused` event is emitted for the first call; none for the
+//       second
+// ---------------------------------------------------------------------------
+
+/// (a) The full stream record is unchanged by a rejected double-pause.
+///
+/// This pins that none of the accounting fields (`paused_at`, `paused_total`,
+/// `status`, `withdrawn`, `deposited`, `end_time`, …) is mutated by the second
+/// call. The freeze point must stay at the original `pause` instant; in
+/// particular `paused_at` must not be overwritten with the later timestamp.
+#[test]
+fn double_pause_is_idempotent_state() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Accrue for 30 days, then pause. Record the stream state immediately after.
+    h.advance(30 * DAY);
+    h.client.pause(&id);
+    let state_after_first_pause = h.get(id);
+
+    // Advance time to simulate a retry from a different ledger.
+    h.advance(5 * DAY);
+
+    // The second call must be refused.
+    let err = h.client.try_pause(&id).unwrap_err().unwrap();
+    assert_eq!(
+        err,
+        Error::StreamAlreadyPaused,
+        "second pause must return StreamAlreadyPaused"
+    );
+
+    // Every field must be identical to what was stored right after the first pause.
+    let state_after_second_attempt = h.get(id);
+    assert_eq!(
+        state_after_second_attempt.status, state_after_first_pause.status,
+        "status must not change"
+    );
+    assert_eq!(
+        state_after_second_attempt.paused_at, state_after_first_pause.paused_at,
+        "paused_at must not move to the retry timestamp"
+    );
+    assert_eq!(
+        state_after_second_attempt.paused_total, state_after_first_pause.paused_total,
+        "paused_total must not change"
+    );
+    assert_eq!(
+        state_after_second_attempt.deposited, state_after_first_pause.deposited,
+        "deposited must not change"
+    );
+    assert_eq!(
+        state_after_second_attempt.withdrawn, state_after_first_pause.withdrawn,
+        "withdrawn must not change"
+    );
+    assert_eq!(
+        state_after_second_attempt.end_time, state_after_first_pause.end_time,
+        "end_time must not change"
+    );
+
+    // Resuming still picks up from the original freeze instant, not the retry time.
+    h.client.resume(&id);
+    // Paused for 5 days (from first pause to resume), not 10 (which it would
+    // be if the freeze point had been overwritten by the second attempt).
+    assert_eq!(
+        h.get(id).paused_total,
+        5 * DAY,
+        "paused_total must reflect the original freeze point, not the retry time"
+    );
+    h.assert_pool_exact();
+}
+
+/// (b) Token balances — sender, recipient and pool — are unaffected by both
+/// the first pause and the rejected second pause.
+///
+/// `pause` freezes the *clock*, not the tokens. No transfer ever happens on
+/// either call. This test records balances before the first pause and asserts
+/// they are unchanged after both calls.
+#[test]
+fn double_pause_token_balances_unchanged() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Let some time pass so the stream has a non-trivial state.
+    h.advance(40 * DAY);
+
+    // Snapshot all relevant balances before the first pause.
+    let sender_before = h.balance(&h.sender);
+    let recipient_before = h.balance(&h.recipient);
+    let pool_before = h.pool();
+
+    // First pause — must succeed.
+    h.client.pause(&id);
+
+    // Balances must not have moved.
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance must not change on pause"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance must not change on pause"
+    );
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance must not change on pause"
+    );
+
+    // Advance a bit and retry.
+    h.advance(3 * DAY);
+
+    // Second pause — must be refused.
+    assert_eq!(
+        h.client.try_pause(&id).unwrap_err().unwrap(),
+        Error::StreamAlreadyPaused,
+    );
+
+    // Balances must still be unchanged after the rejected second call.
+    assert_eq!(
+        h.balance(&h.sender),
+        sender_before,
+        "sender balance must not change on rejected second pause"
+    );
+    assert_eq!(
+        h.balance(&h.recipient),
+        recipient_before,
+        "recipient balance must not change on rejected second pause"
+    );
+    assert_eq!(
+        h.pool(),
+        pool_before,
+        "pool balance must not change on rejected second pause"
+    );
+
+    // Pool invariant: the pool still exactly covers the outstanding liability.
+    h.assert_pool_exact();
+}
+
+/// (c) Event discipline for a double-pause: exactly one `Paused` event on the
+/// first call; no event at all on the rejected second call.
+///
+/// The event buffer is checked immediately after each call, before any other
+/// client call can replace the snapshot. The first call's event payload is
+/// verified byte-for-byte against the post-call stream state (independent
+/// ground truth). The second call's buffer must be empty.
+#[test]
+fn double_pause_event_assertions() {
+    use crate::events::Paused;
+    use soroban_sdk::testutils::Events as _;
+    use soroban_sdk::Event as _;
+
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.advance(25 * DAY);
+
+    // --- First pause: exactly one Paused event ----------------------------
+    h.client.pause(&id);
+
+    // Collect events emitted by the stream contract during this invocation.
+    // Must be done before any other client call resets the event buffer.
+    let events_first: std::vec::Vec<_> = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+
+    // Build the expected event from independent ground truth (stream in storage).
+    let s = h.get(id);
+    let expected_paused = Paused {
+        stream_id: id,
+        sender: h.sender.clone(),
+        paused_at: s.paused_at.expect("paused_at must be set after pause"),
+        paused_total: s.paused_total,
+        recipient: h.recipient.clone(),
+    };
+
+    assert_eq!(
+        events_first,
+        std::vec![expected_paused.to_xdr(&h.env, &h.contract_id)],
+        "first pause must emit exactly one Paused event with the correct payload"
+    );
+
+    // Verify the individual event fields against independent ground truth.
+    assert_eq!(s.paused_total, 0, "paused_total must be 0 on first pause");
+
+    // --- Second pause (retry): no event must be emitted ------------------
+    h.advance(7 * DAY);
+    let _ = h.client.try_pause(&id); // returns StreamAlreadyPaused, ignored here
+
+    let events_second: std::vec::Vec<_> = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+
+    assert!(
+        events_second.is_empty(),
+        "rejected second pause must not emit any event; got {count} event(s)",
+        count = events_second.len()
+    );
+}

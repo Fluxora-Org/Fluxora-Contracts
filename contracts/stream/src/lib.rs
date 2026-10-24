@@ -1632,6 +1632,14 @@ impl FluxoraStream {
     /// forward by the paused duration. Total value delivered stays constant; the
     /// schedule simply stretches. The recipient can still withdraw what they
     /// already earned.
+    ///
+    /// **Double-call / retry behaviour.** If the stream is already `Paused` this
+    /// call returns [`Error::StreamAlreadyPaused`] (13) and changes nothing: no
+    /// state is written, no token moves, and no event is emitted. A client that
+    /// retries after a timeout therefore receives a typed error on the second
+    /// attempt and can distinguish that from a first successful pause. The stream
+    /// remains frozen at the original `paused_at` instant; `paused_total` is
+    /// unaffected.
     pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {
         // Emergency halt (#1818): refuse state changes before anything else.
         Self::require_not_halted(&env)?;
