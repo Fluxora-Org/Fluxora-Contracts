@@ -1,10 +1,11 @@
 //! Stage 2 — recipient transfer.
 
-use soroban_sdk::testutils::{Address as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::events::Event as _;
+use soroban_sdk::testutils::{Address as _, Events as _, MockAuth, MockAuthInvoke};
 use soroban_sdk::{Address, IntoVal};
 
 use super::common::*;
-use crate::{DataKey, Error, Stream, StreamStatus};
+use crate::{events, DataKey, Error, Stream, StreamStatus};
 
 fn assert_claim(
     h: &Harness,
@@ -355,6 +356,40 @@ fn transfer_after_depletion_is_rejected_and_retry_is_stable() {
     }
     assert_eq!(h.get(id).recipient, h.recipient);
     assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+}
+
+#[test]
+fn retrying_a_transfer_is_idempotent() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    h.client.transfer_recipient(&id, &h.other);
+    let first_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    assert_eq!(first_events.events().len(), 1);
+    assert_eq!(
+        first_events.events().last().unwrap(),
+        &events::RecipientTransferred {
+            stream_id: id,
+            old_recipient: h.recipient.clone(),
+            new_recipient: h.other.clone(),
+            sender: h.sender.clone(),
+        }
+        .to_xdr(&h.env, &h.contract_id),
+    );
+    assert_eq!(h.get(id).recipient, h.other);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+
+    h.client.transfer_recipient(&id, &h.other);
+    let retry_events = h.env.events().all().filter_by_contract(&h.contract_id);
+    assert!(
+        retry_events.events().is_empty(),
+        "retry emits no state-changing event"
+    );
+    assert_eq!(h.get(id).recipient, h.other);
+    assert_eq!(h.balance(&h.recipient), 0);
+    assert_eq!(h.balance(&h.other), 1_000_000 * ONE);
+    h.assert_pool_exact();
 }
 
 // --- Guards ---------------------------------------------------------------
