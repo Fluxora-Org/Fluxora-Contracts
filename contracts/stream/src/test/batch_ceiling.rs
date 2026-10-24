@@ -1,10 +1,11 @@
 //! The `MAX_BATCH_SIZE` ceiling, enforced identically by every batch entry point (#1866).
 //!
-//! [`crate::MAX_BATCH_SIZE`] is declared once and consumed by two entry points:
-//! `batch_withdraw` and `batch_extend_ttl`. `test::batch` already covers the
+//! [`crate::MAX_BATCH_SIZE`] is declared once and consumed by four entry points:
+//! `batch_withdraw`, `batch_extend_ttl`, `batch_cancel`, and `batch_create`.
+//! The dedicated batch suites already cover the
 //! interesting *behaviour* of each — what a batch pays, when it rolls back,
 //! which ids it tolerates — and touches the cap from both sides on each. What it
-//! does not do is treat the ceiling as a single published contract with two
+//! does not do is treat the ceiling as a single published contract with four
 //! implementations.
 //!
 //! That distinction is the whole point of this module. Two entry points can each
@@ -26,7 +27,7 @@
 //! 3. **Discovery.** The set of entry points this module knows about is checked
 //!    against the committed ABI inventory: every entry point that takes a batch
 //!    argument must be one of them, and every one of them must be exercised.
-//!    A third batch entry point added later therefore **fails this test by
+//!    Another batch entry point added later therefore **fails this test by
 //!    name** until it is wired into the matrix — the acceptance criterion that
 //!    a future entry point "inherits the same check".
 //!
@@ -34,7 +35,7 @@
 //!
 //! A batch that is empty or oversized is rejected before ids are looked up,
 //! before authorization is checked and before anything is written. That is
-//! asserted for both entry points here — no streams created, no events, no
+//! asserted for every entry point here — no streams created, no events, no
 //! balances moved — so "rejected identically" means identically in effect and
 //! not merely in error code.
 
@@ -58,19 +59,28 @@ const SIZES: [usize; 4] = [0, 1, 16, 17];
 /// A batch entry point, identified by the name the ABI exports it under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryPoint {
-    BatchWithdraw,
-    BatchExtendTtl,
+    Withdraw,
+    ExtendTtl,
+    Cancel,
+    Create,
 }
 
 impl EntryPoint {
     /// Every batch entry point that exists today. Kept in sync with the ABI by
     /// [`the_matrix_covers_every_entry_point_the_abi_advertises`].
-    const ALL: [EntryPoint; 2] = [EntryPoint::BatchWithdraw, EntryPoint::BatchExtendTtl];
+    const ALL: [EntryPoint; 4] = [
+        EntryPoint::Withdraw,
+        EntryPoint::ExtendTtl,
+        EntryPoint::Cancel,
+        EntryPoint::Create,
+    ];
 
     fn name(self) -> &'static str {
         match self {
-            EntryPoint::BatchWithdraw => "batch_withdraw",
-            EntryPoint::BatchExtendTtl => "batch_extend_ttl",
+            EntryPoint::Withdraw => "batch_withdraw",
+            EntryPoint::ExtendTtl => "batch_extend_ttl",
+            EntryPoint::Cancel => "batch_cancel",
+            EntryPoint::Create => "batch_create",
         }
     }
 
@@ -79,15 +89,47 @@ impl EntryPoint {
     /// types.
     fn call(self, h: &Harness, ids: &[u64]) -> Result<String, Error> {
         let ids = h.ids(ids);
+        // Large refund batches exhaust the SDK debug trace's shadow memory.
+        // Network resource limits and contract events remain fully enabled.
+        h.env
+            .host()
+            .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+            .unwrap();
         match self {
-            EntryPoint::BatchWithdraw => match h.client.try_batch_withdraw(&h.recipient, &ids) {
+            EntryPoint::Cancel => match h.client.try_batch_cancel(&h.sender, &ids) {
+                Ok(Ok(outcome)) => Ok(format!("refunded {}", outcome.refunded)),
+                Err(Ok(err)) => Err(err),
+                other => panic!("batch_cancel: untyped outcome {other:?}"),
+            },
+            EntryPoint::Create => {
+                let mut requests = soroban_sdk::Vec::new(&h.env);
+                for _ in 0..ids.len() {
+                    requests.push_back(crate::BatchCreateRequest {
+                        recipient: h.recipient.clone(),
+                        token: h.token.clone(),
+                        deposit: 10 * ONE,
+                        start_time: h.now(),
+                        end_time: h.now() + 100 * DAY,
+                        cliff_time: h.now(),
+                        cancellable: true,
+                        pausable: true,
+                        transferable: true,
+                    });
+                }
+                match h.client.try_batch_create(&h.sender, &requests) {
+                    Ok(Ok(created)) => Ok(format!("created {}", created.len())),
+                    Err(Ok(err)) => Err(err),
+                    other => panic!("batch_create: untyped outcome {other:?}"),
+                }
+            }
+            EntryPoint::Withdraw => match h.client.try_batch_withdraw(&h.recipient, &ids) {
                 Ok(Ok(total)) => Ok(format!("paid {total}")),
                 Err(Ok(err)) => Err(err),
                 other => panic!("batch_withdraw: untyped outcome {other:?}"),
             },
             // `batch_extend_ttl` does not authenticate: it takes no party and
             // only touches TTL, so there is nothing to authorize.
-            EntryPoint::BatchExtendTtl => match h.client.try_batch_extend_ttl(&ids) {
+            EntryPoint::ExtendTtl => match h.client.try_batch_extend_ttl(&ids) {
                 Ok(Ok(extended)) => Ok(format!("extended {extended}")),
                 Err(Ok(err)) => Err(err),
                 other => panic!("batch_extend_ttl: untyped outcome {other:?}"),

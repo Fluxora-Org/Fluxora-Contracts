@@ -606,12 +606,13 @@ class TestRealErrorMd:
     def test_stream_section_present(self, real_sections):
         assert "ContractError (stream)" in real_sections
 
-    def test_stream_has_all_34_variants(self, real_sections):
+    def test_stream_documents_every_source_variant_once(self, real_sections):
+        import re
+        source = (Path(__file__).resolve().parent.parent / "contracts/stream/src/error.rs").read_text()
+        expected = {(name, int(code)) for name, code in re.findall(r"^    (\w+) = (\d+),", source, re.M)}
         stream = real_sections["ContractError (stream)"]
-        assert {entry.code for entry in stream} == set(range(1, 35))
-    def test_stream_has_all_38_variants(self, real_sections):
-        stream = real_sections["ContractError (stream)"]
-        assert {entry.code for entry in stream} == set(range(1, 39))
+        assert len(stream) == len(expected)
+        assert {(entry.name, entry.code) for entry in stream} == expected
 
     def test_stream_has_no_intra_collisions_after_fix(self, real_sections):
         """docs/error.md stream table was fixed: no intra-section collisions remain."""

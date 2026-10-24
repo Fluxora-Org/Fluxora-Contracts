@@ -371,7 +371,11 @@ fn cancel_while_paused_after_partial_withdrawal() {
     h.advance(YEAR);
     assert_eq!(h.client.withdrawable_of(&id), 200 * ONE);
     assert_eq!(h.client.withdraw(&id, &None), 200 * ONE);
-    assert_eq!(h.balance(&h.recipient), 300 * ONE, "100 + 200 withdrawn total");
+    assert_eq!(
+        h.balance(&h.recipient),
+        300 * ONE,
+        "100 + 200 withdrawn total"
+    );
     assert_eq!(h.pool(), 0);
     h.assert_pool_exact();
 }

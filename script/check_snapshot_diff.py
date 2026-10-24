@@ -3,6 +3,7 @@
 
 Parses snapshot JSON files changed in a PR and exits 1 if any
 security-relevant field (auth, events, error codes, storage) was altered.
+Exits 2 if Git or a file read fails, because no reliable verdict is available.
 """
 
 import argparse
@@ -84,16 +85,26 @@ def get_diff_paths(old, new, prefix: str = ""):
     return [prefix] if prefix else [""]
 
 
+class SnapshotReadError(Exception):
+    """The snapshot comparison could not read its inputs."""
+
+
+def _git_output(args: list[str]) -> bytes:
+    try:
+        return subprocess.check_output(
+            ["git", *args], cwd=REPO_ROOT, text=False, stderr=subprocess.PIPE
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise SnapshotReadError(f"git {args[0]} failed: {detail or error}") from error
+    except OSError as error:
+        raise SnapshotReadError(f"could not run git {args[0]}: {error}") from error
+
+
 def get_changed_files(base: str, head=None) -> list[str]:
     """Return JSON snapshot files changed between base and head."""
-    try:
-        if head is None:
-            cmd = ["git", "diff", "--name-only", base]
-        else:
-            cmd = ["git", "diff", "--name-only", base, head]
-        out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=False)
-    except (subprocess.CalledProcessError, OSError):
-        return []
+    refs = [base] if head is None else [base, head]
+    out = _git_output(["diff", "--name-only", *refs, "--"])
 
     files = []
     for line in out.decode("utf-8", errors="replace").splitlines():
@@ -106,15 +117,19 @@ def get_changed_files(base: str, head=None) -> list[str]:
 def get_file_content(commit, path):
     """Return file content from git history or disk."""
     if commit is not None:
-        try:
-            out = subprocess.check_output(["git", "show", f"{commit}:{path}"])
-            return out.decode("utf-8", errors="replace")
-        except (subprocess.CalledProcessError, OSError, ValueError):
+        # A file can genuinely be absent on one side of an addition/deletion.
+        # Check the tree first instead of treating every failed `git show` as
+        # an absent file (which masks invalid refs and repository read errors).
+        if not _git_output(["ls-tree", "--name-only", "-z", commit, "--", path]):
             return None
+        return _git_output(["show", f"{commit}:{path}"]).decode("utf-8", errors="replace")
     full = REPO_ROOT / path
     if not full.exists():
         return None
-    return full.read_text(encoding="utf-8")
+    try:
+        return full.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise SnapshotReadError(f"could not read {path}: {error}") from error
 
 
 def _safe_json(text):
@@ -126,13 +141,8 @@ def _safe_json(text):
         return {}
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Check snapshot security diffs")
-    parser.add_argument("--base", default="HEAD", help="Base ref to compare against")
-    parser.add_argument("--head", default=None, help="Optional head ref to compare against")
-    args = parser.parse_args()
-
-    changed = get_changed_files(args.base, args.head)
+def check_snapshots(base: str, head: str | None) -> int:
+    changed = get_changed_files(base, head)
     if not changed:
         print("No snapshot JSON files changed.")
         return 0
@@ -142,8 +152,8 @@ def main() -> int:
     messages = []
 
     for rel_path in changed:
-        old_text = get_file_content(args.base, rel_path)
-        new_text = get_file_content(args.head, rel_path)
+        old_text = get_file_content(base, rel_path)
+        new_text = get_file_content(head, rel_path)
         old_data = _safe_json(old_text)
         new_data = _safe_json(new_text)
 
@@ -167,6 +177,18 @@ def main() -> int:
 
     print("No security-relevant snapshot changes detected.")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check snapshot security diffs")
+    parser.add_argument("--base", default="HEAD", help="Base ref to compare against")
+    parser.add_argument("--head", default=None, help="Optional head ref to compare against")
+    args = parser.parse_args()
+    try:
+        return check_snapshots(args.base, args.head)
+    except SnapshotReadError as error:
+        print(f"ERROR: snapshot comparison incomplete: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

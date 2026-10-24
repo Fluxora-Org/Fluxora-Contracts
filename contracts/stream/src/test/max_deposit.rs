@@ -27,7 +27,7 @@ use soroban_sdk::Event as _;
 
 use super::common::*;
 use crate::events::{StreamCreated, Withdrawn};
-use crate::{Error, StreamStatus};
+use crate::{CliffMode, Error, ReleaseCurve, StreamStatus};
 
 // ---------------------------------------------------------------------------
 // Fixture: the harness plus a token whose whole supply is `i128::MAX`
@@ -113,6 +113,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
 
     let created = f.stream_events();
     let expected = StreamCreated {
+        reference: None,
+        curve: crate::ReleaseCurve::Linear,
+        cliff_mode: crate::CliffMode::Schedule,
         stream_id: id,
         sender: h.sender.clone(),
         recipient: h.recipient.clone(),
@@ -124,6 +127,9 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
         cancellable: true,
         pausable: true,
         transferable: true,
+        curve: ReleaseCurve::Linear,
+        cliff_mode: CliffMode::Schedule,
+        reference: None,
     };
     assert_eq!(
         created,
@@ -175,12 +181,18 @@ fn max_deposit_streams_and_settles_end_to_end_through_the_public_abi() {
 
     let drained = f.stream_events();
     let expected = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: deposit,
         withdrawn: deposit,
         deposited: deposit,
         status: StreamStatus::Depleted,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     assert_eq!(
         drained,

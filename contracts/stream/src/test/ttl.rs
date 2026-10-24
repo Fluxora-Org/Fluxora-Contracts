@@ -28,7 +28,7 @@ use soroban_sdk::testutils::storage::Persistent as _;
 use soroban_sdk::testutils::Ledger as _;
 
 use super::common::*;
-use crate::{storage, DataKey, TTL_BUFFER_SECONDS, TTL_SAFETY_MARGIN_PERCENT};
+use crate::{storage, DataKey, TTL_BUFFER_SECONDS};
 
 #[test]
 fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {
@@ -45,6 +45,78 @@ fn persisted_stream_fixture_survives_read_mutate_and_ttl_extension() {
     assert_eq!(after.withdrawn, before.withdrawn);
     assert_eq!(after.deposited, 1_250 * super::common::ONE);
     assert!(ttl_of(&h, id) > 0);
+}
+
+#[test]
+fn metadata_and_curve_stay_live_with_their_parent_stream() {
+    let h = Harness::new();
+    let now = h.now();
+    let reference = soroban_sdk::String::from_str(&h.env, "payroll-2026");
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &(1_000 * ONE),
+        &now,
+        &(now + 100 * DAY),
+        &now,
+        &true,
+        &true,
+        &true,
+        &Some(reference.clone()),
+    );
+    let wall = h.create_with_cliff_mode(
+        1_000 * ONE,
+        now,
+        now + 100 * DAY,
+        now + 10 * DAY,
+        crate::CliffMode::WallClock,
+        true,
+        true,
+        true,
+    );
+    let curved = h.client.create_stream_with_curve(
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &(1_000 * ONE),
+        &now,
+        &(now + 100 * DAY),
+        &now,
+        &true,
+        &true,
+        &true,
+        &crate::ReleaseCurve::Step,
+    );
+    let sidecars = [
+        (id, DataKey::StreamMetadata(id)),
+        (wall, DataKey::StreamMetadata(wall)),
+        (curved, DataKey::StreamCurve(curved)),
+    ];
+    for (stream_id, key) in &sidecars {
+        let parent_ttl = ttl_of(&h, *stream_id);
+        h.env.as_contract(&h.contract_id, || {
+            assert_eq!(h.env.storage().persistent().get_ttl(key), parent_ttl);
+        });
+    }
+    // Age entries without changing the schedule, then renew through the public keeper path.
+    age_ledgers(&h, 100_000);
+    for (stream_id, key) in &sidecars {
+        let aged = ttl_of(&h, *stream_id);
+        h.client.extend_stream_ttl(stream_id);
+        let parent_ttl = ttl_of(&h, *stream_id);
+        h.env.as_contract(&h.contract_id, || {
+            let renewed = h.env.storage().persistent().get_ttl(key);
+            assert!(renewed > aged);
+            assert_eq!(renewed, parent_ttl);
+        });
+    }
+    h.client.pause(&id);
+    h.client.resume(&id);
+    assert_eq!(h.get(id).reference, Some(reference));
+    assert_eq!(h.get(wall).cliff_mode, crate::CliffMode::WallClock);
+    assert_eq!(h.get(curved).curve, crate::ReleaseCurve::Step);
+    h.assert_pool_exact();
 }
 
 /// Remaining TTL, in ledgers, of a stream entry.

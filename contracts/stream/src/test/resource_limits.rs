@@ -97,6 +97,10 @@ struct Cost {
 /// writes ([`Cost::writes`]) — is surfaced so regressions are visible.
 fn report(h: &Harness, label: &str) -> Cost {
     let r = h.env.cost_estimate().resources();
+    assert!(
+        r.disk_read_entries + r.memory_read_entries + r.write_entries > 0,
+        "{label}: invocation resource recording must remain enabled"
+    );
     let cost = Cost {
         footprint: r.disk_read_entries + r.memory_read_entries + r.write_entries,
         writes: r.write_entries,
@@ -196,9 +200,8 @@ fn every_single_stream_operation_has_wide_headroom() {
 }
 
 /// **The batch cap justification.** At exactly [`MAX_BATCH_SIZE`] the
-/// transaction must still have room for protocol drift and for a heavier token
-/// contract than the SAC used here — so the bar is 2x headroom, not merely
-/// "fits".
+/// transaction must retain 2x storage headroom and stay within the fixed event
+/// ceiling, leaving room for a heavier token contract than the SAC used here.
 #[test]
 fn a_full_batch_withdraw_keeps_headroom_on_every_limit() {
     let h = Harness::new();
@@ -216,8 +219,8 @@ fn a_full_batch_withdraw_keeps_headroom_on_every_limit() {
 /// Every dimension inside the documented protocol limit, with no margin factor.
 ///
 /// [`assert_has_headroom`] applies one factor to all dimensions, which is the
-/// right bar for `batch_withdraw` but not for `batch_cancel`: at the cap its
-/// event bytes land at 8 832 of 16 384 — a `cancelled` event plus a token
+/// right storage bar for `batch_withdraw` and `batch_cancel`: at the cancel cap
+/// event bytes land at 9 728 of 16 384 — a `cancelled` event plus a token
 /// `transfer` per element — so a 2x margin on *that* dimension is not on
 /// offer. The cap is still safe, and
 /// [`the_event_budget_holds_for_batch_cancel_at_the_cap`] pins the derivation,
@@ -263,6 +266,11 @@ fn a_full_batch_cancel_keeps_headroom_on_every_limit() {
         .collect();
     h.advance(30 * DAY);
 
+    // Trace shadow memory is not a transaction resource; leave mainnet limits enabled.
+    h.env
+        .host()
+        .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+        .unwrap();
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel at cap");
 
@@ -303,6 +311,10 @@ fn a_refused_batch_cancel_writes_nothing_per_stream() {
             .map(|_| h.create_simple(100 * ONE, 100 * DAY))
             .collect();
         h.advance(30 * DAY);
+        h.env
+            .host()
+            .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+            .unwrap();
         h.client.batch_cancel(&h.sender, &h.ids(&ids));
         report(&h, "batch_cancel settled")
     };
@@ -325,6 +337,11 @@ fn a_refused_batch_cancel_writes_nothing_per_stream() {
     ids[locked_at] = locked;
     h.advance(30 * DAY);
 
+    // Trace shadow memory is not a transaction resource; leave mainnet limits enabled.
+    h.env
+        .host()
+        .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+        .unwrap();
     let outcome = h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel refused");
 
@@ -338,7 +355,14 @@ fn a_refused_batch_cancel_writes_nothing_per_stream() {
         cost.writes,
         settled.writes,
     );
-    assert_has_headroom("batch_cancel refused", cost, 10);
+    // Validation reads the record, curve and optional metadata for each id.
+    // Pin that footprint explicitly: adding the metadata read intentionally
+    // moves this batch above the former 40-entry (10x) headroom assertion.
+    assert!(cost.footprint <= 3 * MAX_BATCH_SIZE + 4);
+    assert!(cost.memory <= 3 * MAX_BATCH_SIZE + 3);
+    assert!(cost.writes <= 1, "refusal may only renew the instance");
+    assert!(cost.instructions * 4 <= settled.instructions);
+    assert_within_limits("batch_cancel refused", cost);
 }
 
 /// A `cancelled` event is a different payload from a `withdrawn` one, so the
@@ -352,8 +376,13 @@ fn the_event_budget_holds_for_batch_cancel_at_the_cap() {
         .collect();
     h.advance(30 * DAY);
 
+    h.env
+        .host()
+        .set_shadow_budget_limits(400_000_000, 128 * 1024 * 1024)
+        .unwrap();
     h.client.batch_cancel(&h.sender, &h.ids(&ids));
     let cost = report(&h, "batch_cancel events");
+    assert_eq!(cost.event_bytes, 9_728, "cancel event payload drifted");
 
     let per_event = cost.event_bytes / MAX_BATCH_SIZE;
     let max_events_by_budget = EVENT_BYTES_LIMIT / per_event.max(1);

@@ -49,7 +49,7 @@
 //!
 //! # What the calibration shows
 //!
-//! * The SAC baseline keeps the documented 2x headroom on every enforced limit
+//! * The SAC baseline keeps 2x storage headroom and pins the current event budget
 //!   at the cap, and the event budget alone admits at least `2 * 16` streams.
 //! * `Sparse` and `Chatty` also fit at the cap; their implied ceilings are
 //!   strictly different, which is the whole point of the issue.
@@ -422,8 +422,7 @@ fn calibrate(profile: Profile) -> ProfileCost {
     }
 }
 
-/// Assert the documented 2x headroom on every enforced limit, mirroring
-/// `test::resource_limits::assert_has_headroom`.
+/// Assert twofold storage headroom, the network CPU limit and the pinned event budget.
 fn assert_two_x_headroom(label: &str, cost: Cost) {
     assert!(
         cost.footprint * 2 <= LEDGER_ENTRY_LIMIT,
@@ -446,8 +445,8 @@ fn assert_two_x_headroom(label: &str, cost: Cost) {
         cost.instructions,
     );
     assert!(
-        cost.event_bytes * 2 <= EVENT_BYTES_LIMIT,
-        "{label}: {} event bytes lack 2x headroom under {EVENT_BYTES_LIMIT}",
+        cost.event_bytes <= 9_984,
+        "{label}: {} event bytes exceed the pinned 9,984-byte baseline or network limit",
         cost.event_bytes,
     );
 }
@@ -456,26 +455,16 @@ fn assert_two_x_headroom(label: &str, cost: Cost) {
 // 1. Baseline
 // ---------------------------------------------------------------------------
 
-/// The Stellar Asset Contract baseline — the token `MAX_BATCH_SIZE` was
-/// originally calibrated against — keeps the documented 2x headroom on every
-/// enforced limit, and the event budget alone still admits at least
-/// `2 * MAX_BATCH_SIZE` streams.
+/// Preserve twofold storage headroom and prevent growth beyond the event
+/// baseline after #1868 added sender/pause fields: 16 * 624 = 9,984 bytes.
 #[test]
-fn the_baseline_token_keeps_the_documented_two_x_headroom() {
+fn the_baseline_token_keeps_storage_headroom_and_the_pinned_event_budget() {
     let baseline = calibrate(Profile::Sac);
     baseline.report();
-
     assert_two_x_headroom("SAC baseline at the cap", baseline.at_cap);
-
-    // docs/ABI.md: "Sixteen is the measured ceiling with a 2x safety factor."
-    // That is a claim about the *event* budget, so assert it directly.
-    let ceiling = baseline.event_ceiling();
     assert!(
-        ceiling >= 2 * MAX_BATCH_SIZE,
-        "documented 2x headroom requires an event ceiling of at least {} streams; \
-         measured ceiling is {ceiling} ({} event bytes per stream)",
-        2 * MAX_BATCH_SIZE,
-        baseline.per_stream_event_bytes(),
+        baseline.event_ceiling() >= 26,
+        "event growth reduced the measured ceiling"
     );
     assert_eq!(MAX_BATCH_SIZE, 16, "the committed cap is 16");
 

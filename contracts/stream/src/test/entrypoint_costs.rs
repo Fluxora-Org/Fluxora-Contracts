@@ -264,4 +264,34 @@ fn entrypoint_cost_snapshot() {
     h.client.set_halt_operator(&h.sender);
     h.client.halt_operator();
     record(&h, "halt_operator");
+    let (h, _) = fresh();
+    assert!(!h.client.upgradeable());
+    record(&h, "upgradeable");
+
+    let (h, id) = fresh();
+    h.advance(10 * DAY);
+    h.client.cancel(&id);
+    assert_eq!(h.client.reclaim_dust(&id), 0);
+    record(&h, "reclaim_dust");
+
+    let h = wasm_harness();
+    let factory_id = h.env.register(fluxora_factory::FluxoraFactory, ());
+    let factory = fluxora_factory::FluxoraFactoryClient::new(&h.env, &factory_id);
+    factory.init(&h.sender, &h.contract_id, &(10_000 * ONE), &1);
+    factory.set_allowlist(&h.token, &true);
+    let start = h.now();
+    h.client.create_stream_via_factory(
+        &factory_id,
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &(1_000 * ONE),
+        &start,
+        &(start + 100 * DAY),
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+    record(&h, "create_stream_via_factory");
 }

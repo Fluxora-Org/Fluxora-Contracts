@@ -1,9 +1,9 @@
 //! Issue #1852 — TTL extension on a stream at the minimum TTL floor.
 //!
 //! `MIN_STREAM_TTL_LEDGERS` (30 days at the nominal 5 seconds per ledger,
-//! 518,400 ledgers) is the rent a stream entry gets once its schedule has
+//! 622,080 ledgers, including the 20% drift margin) is the rent a stream entry gets once its schedule has
 //! fully elapsed: `storage::ttl_target_ledgers` computes
-//! `ceil((remaining_life + TTL_BUFFER_SECONDS) / 5)` and floors it at the
+//! `seconds_to_ledgers(remaining_life + TTL_BUFFER_SECONDS)` and floors it at the
 //! minimum. The floor is where an extension either takes effect or silently
 //! does nothing, and neither outcome was covered before this module.
 //!
@@ -11,12 +11,12 @@
 //!
 //! 1. a settled stream targets exactly the floor;
 //! 2. the floor starts to bind exactly at `end_time` (one ledger earlier the
-//!    target is one ledger above it);
+//!    target includes the ledger-close margin);
 //! 3. an extension that only has to clear the floor still writes;
 //! 4. extending an entry already at the floor is a safe no-op;
 //! 5. an entry holding more rent than the floor is never clipped down to it;
 //! 6. a floor extension preserves accounting and conserves funds end to end;
-//! 7. a terminal `Depleted` stream still gets its floor;
+//! 7. settlement grants the floor, while terminal keeper extensions are rejected;
 //! 8. a keeper sweep over already-floored entries is idempotent.
 //!
 //! Every claim asserts both sides of its boundary, so an off-by-one cannot
@@ -55,6 +55,14 @@ const DEPOSIT: i128 = 1_000 * ONE;
 fn age_ledgers(h: &Harness, ledgers: u32) {
     let seq = h.env.ledger().sequence();
     h.env.ledger().set_sequence_number(seq + ledgers);
+}
+
+/// Arrange rent independently of the wall clock: creation includes a drift
+/// margin, so reaching the end does not imply the remaining rent is at MIN.
+fn age_to(h: &Harness, id: u64, remaining: u32) {
+    let current = h.ttl_of(id);
+    assert!(current >= remaining);
+    age_ledgers(h, current - remaining);
 }
 
 /// All `ttl_extended` events from the most recent contract invocation, as
@@ -131,6 +139,7 @@ fn a_settled_stream_targets_exactly_the_floor() {
 
     // Settle the schedule, and let the creation rent decay below the floor.
     h.warp_to(T0 + DURATION + 10 * DAY);
+    age_to(&h, id, MIN - 1);
     let before = h.ttl_of(id);
     assert!(
         before < MIN,
@@ -170,7 +179,7 @@ fn a_settled_stream_targets_exactly_the_floor() {
 // 2. The floor starts to bind exactly at the stream's end
 // ---------------------------------------------------------------------------
 
-/// The target is `MIN + 1` with exactly one ledger (5 seconds) of life left,
+/// The target is `MIN + 2` with five seconds of life left (20% margin, rounded up),
 /// and exactly `MIN` at `end_time`. Both sides of the boundary are asserted,
 /// so an off-by-one in the ledger conversion cannot pass.
 #[test]
@@ -178,26 +187,26 @@ fn the_floor_starts_to_bind_exactly_at_the_streams_end() {
     let h = Harness::new();
     let id = h.create_simple(DEPOSIT, DURATION);
 
-    // --- one ledger (5 seconds) before the end: one above the floor ---
+    // --- five seconds before the end: two margined ledgers above the floor ---
     h.advance(DURATION - 5);
     assert_eq!(h.now(), T0 + DURATION - 5);
     // Decay below the target so the extension has to write.
-    age_ledgers(&h, 1_000);
+    age_to(&h, id, MIN - 1);
     let before = h.ttl_of(id);
     let funded = h.client.extend_stream_ttl(&id);
     assert_eq!(
         funded,
-        MIN + 1,
-        "one ledger of remaining life is worth exactly one ledger above the floor"
+        MIN + 2,
+        "five seconds with 20% margin round up to two ledgers above the floor"
     );
-    assert_eq!(h.ttl_of(id), MIN + 1);
+    assert_eq!(h.ttl_of(id), MIN + 2);
     assert!(funded > MIN, "the floor must not bind one ledger early");
     assert!(h.ttl_of(id) > before);
 
     // --- exactly at the end: the floor binds ---
     h.advance(5);
     assert_eq!(h.now(), T0 + DURATION);
-    age_ledgers(&h, 1_000);
+    age_to(&h, id, MIN - 1);
     let before = h.ttl_of(id);
     let funded = h.client.extend_stream_ttl(&id);
     assert_eq!(funded, MIN, "at the end the target is exactly the floor");
@@ -221,6 +230,7 @@ fn an_extension_that_only_has_to_clear_the_floor_still_takes_effect() {
     let id = h.create_simple(DEPOSIT, DURATION);
 
     h.advance(DURATION);
+    age_to(&h, id, MIN);
     assert_eq!(h.now(), T0 + DURATION);
     assert_eq!(h.ttl_of(id), MIN, "the settled entry lands on the floor");
 
@@ -262,6 +272,7 @@ fn extending_an_entry_already_at_the_floor_is_a_safe_no_op() {
     let h = Harness::new();
     let id = h.create_simple(DEPOSIT, DURATION);
     h.warp_to(T0 + DURATION + 10 * DAY);
+    age_to(&h, id, MIN - 1);
 
     let first = h.client.extend_stream_ttl(&id);
     assert_eq!(first, MIN);
@@ -345,6 +356,7 @@ fn a_floor_extension_preserves_accounting_and_conserves_funds() {
     assert_eq!(h.balance(&h.sender), minted - DEPOSIT);
 
     h.warp_to(T0 + DURATION + 10 * DAY);
+    age_to(&h, id, MIN - 1);
     let pool_before = h.pool();
     assert_eq!(pool_before, DEPOSIT);
 
@@ -374,33 +386,27 @@ fn a_floor_extension_preserves_accounting_and_conserves_funds() {
 // 7. A depleted stream still gets its floor
 // ---------------------------------------------------------------------------
 
-/// `extend_stream_ttl` is documented as valid for terminal streams. After a
-/// full withdrawal the entry is `Depleted`; its rent must still be restorable
-/// to the floor, with the terminal state and the (now empty) accounting
-/// untouched.
+/// Settlement grants terminal records at least the floor. Keepers cannot
+/// extend terminal streams; refusal preserves the remaining rent and state.
 #[test]
-fn a_depleted_stream_still_gets_its_floor() {
+fn a_depleted_stream_keeps_its_settlement_floor_but_rejects_keeper_extensions() {
     let h = Harness::new();
     let id = h.create_simple(DEPOSIT, DURATION);
     h.warp_to(T0 + DURATION + 10 * DAY);
+    age_to(&h, id, MIN - 1);
     assert_eq!(h.client.withdraw(&id, &None), DEPOSIT);
-
+    assert!(h.ttl_of(id) >= MIN);
     let depleted = h.get(id);
     assert_eq!(depleted.status, StreamStatus::Depleted);
-    assert_eq!(h.pool(), 0);
-
-    // Let the terminal entry's rent decay below the floor.
-    age_ledgers(&h, MIN + 1);
+    age_to(&h, id, MIN - 1);
     let before = h.ttl_of(id);
-    assert!(before < MIN, "precondition: entry decayed below the floor");
-
-    let funded = h.client.extend_stream_ttl(&id);
-    let events = ttl_extended_events(&h);
-    assert_eq!(funded, MIN);
-    assert_eq!(h.ttl_of(id), MIN);
-    assert_eq!(events, std::vec![(id, MIN)]);
-
-    assert_eq!(h.get(id), depleted, "terminal state must be untouched");
+    assert_eq!(
+        h.client.try_extend_stream_ttl(&id).unwrap_err().unwrap(),
+        crate::Error::StreamTerminated
+    );
+    assert!(ttl_extended_events(&h).is_empty());
+    assert_eq!(h.ttl_of(id), before);
+    assert_eq!(h.get(id), depleted);
     assert_eq!(h.pool(), 0);
     h.assert_pool_exact();
 }
@@ -424,6 +430,8 @@ fn a_keeper_sweep_over_floored_entries_is_idempotent() {
     // 125 days: every schedule has fully elapsed, and every entry is still
     // live (the shortest creation TTL covers 130 days) but below the floor.
     h.warp_to(T0 + 125 * DAY);
+    // Age the longest entry below MIN; the shorter entries remain live.
+    age_to(&h, c, MIN - 1);
     for id in [a, b, c] {
         assert!(
             h.ttl_of(id) < MIN,

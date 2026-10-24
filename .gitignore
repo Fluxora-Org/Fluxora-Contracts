@@ -37,3 +37,4 @@ script/testnet-exercise.log
 *.log
 .gitignore
 branch_structure.json
+config.bat

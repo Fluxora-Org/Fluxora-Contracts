@@ -128,7 +128,7 @@ const ALL: [Error; 46] = [
 /// Frozen allowlist of discriminants that have no reaching test, in ascending
 /// order. Every entry must carry a reason in [`describe`] and a matching line
 /// in `docs/ABI.md` "Error".
-const RESERVED_DISCRIMINANTS: [u32; 11] = [11, 26, 29, 31, 33, 41, 42, 43, 44, 45, 46];
+const RESERVED_DISCRIMINANTS: [u32; 5] = [11, 26, 29, 31, 33];
 
 /// Name, discriminant, and account for a variant.
 ///
@@ -742,54 +742,72 @@ fn describe(e: Error) -> (&'static str, u32, Account) {
         Error::FactoryPaused => (
             "FactoryPaused",
             41,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when the factory's \
-                 creation_paused flag is set. Covered by \
-                 test::factory_policy_enforcement::factory_pause_blocks_creation.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::FactoryPaused)),
         ),
         Error::DepositExceedsCap => (
             "DepositExceedsCap",
             42,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when deposit > max_deposit. \
-                 Covered by test::factory_policy_enforcement::deposit_above_cap_is_rejected.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::DepositExceedsCap)),
         ),
         Error::DurationBelowMinimum => (
             "DurationBelowMinimum",
             43,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when duration < min_duration. \
-                 Covered by test::factory_policy_enforcement::duration_below_minimum_is_rejected.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::DurationBelowMinimum)),
         ),
         Error::TokenNotAllowlisted => (
             "TokenNotAllowlisted",
             44,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when the token is absent from \
-                 the factory allowlist. Covered by \
-                 test::factory_policy_enforcement::unlisted_token_is_rejected.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::TokenNotAllowlisted)),
         ),
         Error::RateBelowMin => (
             "RateBelowMin",
             45,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when rate < min_rate_per_second. \
-                 Covered by test::factory_policy_enforcement::rate_below_minimum_is_rejected.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::RateBelowMin)),
         ),
         Error::RateAboveMax => (
             "RateAboveMax",
             46,
-            Account::Reserved(
-                "Only reachable via create_stream_via_factory when rate > max_rate_per_second. \
-                 Covered by test::factory_policy_enforcement::rate_above_maximum_is_rejected.",
-            ),
+            Account::Reach(|h| factory_error(h, Error::RateAboveMax)),
         ),
     }
+}
+
+/// Exercise each policy refusal through the public stream-to-factory call.
+fn factory_error(h: &Harness, expected: Error) -> Error {
+    use fluxora_factory::{FluxoraFactory, FluxoraFactoryClient};
+    let factory_id = h.env.register(FluxoraFactory, ());
+    let factory = FluxoraFactoryClient::new(&h.env, &factory_id);
+    let deposit = 1_000 * ONE;
+    let duration = 100 * DAY;
+    let rate = deposit / duration as i128;
+    factory.init(&h.sender, &h.contract_id, &(10_000 * ONE), &1);
+    factory.set_allowlist(&h.token, &true);
+    match expected {
+        Error::FactoryPaused => factory.set_factory_paused(&true),
+        Error::DepositExceedsCap => factory.set_cap(&(100 * ONE)),
+        Error::DurationBelowMinimum => factory.set_min_duration(&(duration + 1)),
+        Error::TokenNotAllowlisted => factory.set_allowlist(&h.token, &false),
+        Error::RateBelowMin => factory.set_rate_bounds(&Some(rate + 1), &None),
+        Error::RateAboveMax => factory.set_rate_bounds(&None, &Some(rate - 1)),
+        _ => panic!("not a factory policy error"),
+    }
+    let now = h.now();
+    h.client
+        .try_create_stream_via_factory(
+            &factory_id,
+            &h.sender,
+            &h.recipient,
+            &h.token,
+            &deposit,
+            &now,
+            &(now + duration),
+            &now,
+            &true,
+            &true,
+            &true,
+        )
+        .unwrap_err()
+        .unwrap()
 }
 
 // ---------------------------------------------------------------------------

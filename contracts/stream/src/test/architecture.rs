@@ -14,7 +14,7 @@
 //! |---|---|
 //! | Components and which of them ship | root `Cargo.toml` members, `script/release.sh` |
 //! | Storage keys | the `DataKey` enum in `contracts/stream/src/types.rs` |
-//! | Entry point groups and the 16 + 8 split | the committed ABI inventory |
+//! | Entry point groups and the 28 + 8 split | the committed ABI inventory |
 //! | Per-entry-point authority | the authoritative table in `docs/audit.md` |
 //! | Features that are deliberately absent | the same ABI inventory |
 //!
@@ -96,16 +96,19 @@ fn table_rows(section_text: &str) -> Vec<Vec<String>> {
 
 /// A `NAME = ["..."]` string-array assignment from a TOML file.
 fn toml_string_array(toml: &str, key: &str) -> Vec<String> {
-    for line in toml.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix(key) {
-            let rest = rest.trim_start();
-            if let Some(body) = rest.strip_prefix('=') {
-                return backticked(&body.replace('"', "`"));
-            }
-        }
-    }
-    panic!("no `{key}` array in Cargo.toml");
+    let assignment = toml
+        .lines()
+        .position(|line| line.trim_start().starts_with(key))
+        .unwrap_or_else(|| panic!("no `{key}` array in Cargo.toml"));
+    let rest = toml.lines().skip(assignment).collect::<Vec<_>>().join("\n");
+    let start = rest.find('[').expect("array opening bracket");
+    let end = rest[start..].find(']').expect("array closing bracket") + start;
+    let members = backticked(&rest[start + 1..end].replace('"', "`"));
+    assert!(
+        !members.is_empty(),
+        "workspace member array must not be empty"
+    );
+    members
 }
 
 fn abi_function_names() -> Vec<String> {
@@ -291,7 +294,7 @@ fn the_storage_table_is_exactly_the_datakey_enum() {
 // ---------------------------------------------------------------------------
 
 /// The entry point table is exactly the ABI: every exported function listed
-/// once, split into the documented 16 core and 8 delegation entry points.
+/// once, split into the documented 28 core and 8 delegation entry points.
 #[test]
 fn the_entry_point_table_is_exactly_the_abi() {
     let abi = abi_function_names();
@@ -318,14 +321,14 @@ fn the_entry_point_table_is_exactly_the_abi() {
 
     let delegation = documented.iter().filter(|n| is_delegation(n)).count();
     let core = documented.len() - delegation;
-    assert_eq!(core, 16, "the document's core entry point count changed");
+    assert_eq!(core, 28, "the document's core entry point count changed");
     assert_eq!(
         delegation, 8,
         "the document's delegation entry point count changed"
     );
     assert!(
-        surface.contains("16 core entry points plus 8 delegation"),
-        "the document no longer states the 16 + 8 split it is checked against",
+        surface.contains("28 core entry points plus 8 delegation"),
+        "the document no longer states the 28 + 8 split it is checked against",
     );
 
     // The batch ceiling claim.

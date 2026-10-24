@@ -789,45 +789,32 @@ targets = ["wasm32v1-none"]
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
-    /// Restores the process cwd on drop, even if the test panics, so a
-    /// relative-path test cannot poison the other parallel tests.
-    struct CwdGuard(PathBuf);
-
-    impl CwdGuard {
-        fn set(dir: &Path) -> CwdGuard {
-            let prev = std::env::current_dir().expect("current_dir");
-            std::env::set_current_dir(dir).expect("set_current_dir");
-            CwdGuard(prev)
-        }
-    }
-
-    impl Drop for CwdGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.0);
-        }
-    }
-
     #[test]
     fn generate_accepts_a_relative_release_dir() {
-        let s = scratch_repo();
-        write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
-        let _guard = CwdGuard::set(&s.root);
-
-        let manifest = generate(
-            Path::new("target/wasm32v1-none/release"),
-            None,
-            None,
-            DEFAULT_TARGET,
-        )
-        .unwrap();
-        assert_eq!(manifest.build.git_revision, head_revision(&s.root));
-        verify(
-            Path::new("target/wasm32v1-none/release"),
-            None,
-            None,
-            DEFAULT_TARGET,
-        )
-        .unwrap();
+        const CHILD: &str = "FLUXORA_PROVENANCE_RELATIVE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let s = scratch_repo();
+            write_wasm(&s.release, "fluxora_stream.wasm", &sample_wasm());
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::generate_accepts_a_relative_release_dir",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .current_dir(&s.root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "relative-path subprocess failed");
+            return;
+        }
+        let release = Path::new("target/wasm32v1-none/release");
+        let manifest = generate(release, None, None, DEFAULT_TARGET).unwrap();
+        assert_eq!(
+            manifest.build.git_revision,
+            head_revision(&std::env::current_dir().unwrap())
+        );
+        verify(release, None, None, DEFAULT_TARGET).unwrap();
     }
 
     #[test]
