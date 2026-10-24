@@ -32,6 +32,9 @@ mod halt;
 // value, and one past it, pinned on both the halt state and the ledger
 // timestamp it records. Every refusal is a typed error and nothing panics.
 mod halt_boundaries;
+// Issue #2049 — `halt` called twice in a row: repeat submission is refused
+// with a typed error, moves no tokens, and emits no second event.
+mod halt_repeat;
 // Issue #1879 — randomized operation-sequence search proving `VestedDecreased`
 // (33) is unreachable, and documenting it as a defensive invariant.
 mod vested_decreased;

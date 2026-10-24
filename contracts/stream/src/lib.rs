@@ -2465,6 +2465,14 @@ impl FluxoraStream {
     /// climbing; what stops is settlement. Lifting the halt resumes from
     /// exactly the state that was halted.
     ///
+    /// # Repeat submission
+    ///
+    /// A second `halt` while the contract is already halted is **refused**, not
+    /// silently absorbed: it returns [`Error::ContractAlreadyHalted`], emits no
+    /// event, moves no funds, and keeps the halt instant recorded by the first
+    /// call. That is the safe answer for a client retrying after a timeout — the
+    /// retry can neither double-apply the halt nor move its start time.
+    ///
     /// There is no timeout — the halt ends only when the operator resumes it.
     /// Returns [`Error::HaltOperatorNotSet`] when no operator was ever
     /// installed and [`Error::ContractAlreadyHalted`] when already halted.
