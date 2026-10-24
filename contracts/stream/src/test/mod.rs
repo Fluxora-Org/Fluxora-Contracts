@@ -207,3 +207,7 @@ mod max_deposit;
 // Issue #2071 — pin the boundary behaviour of `withdrawable_of`: zero, one,
 // the maximum accepted stream id, and one past it.
 mod withdrawable_of_boundary;
+// Issue #2022 — `upgradeable` is the on-chain statement of the upgrade posture;
+// pin it to `false` (fresh, before any stream, after the halt operator acts)
+// and to the ABI snapshot's published flag.
+mod upgradeable;
