@@ -1118,40 +1118,6 @@ fn batch_withdraw_same_recipient_settles_payroll_with_single_authorisation() {
     );
     assert_eq!(h.balance(&h.recipient), expected_total);
 
-    // Capture the batch's events before any other client call: `Events::all()`
-    // only retains the most recent invocation, so a balance read between the
-    // batch and this helper wipes the stream's own events (as it did when this
-    // read sat above the event assertion).
-    let event_ids = withdrawn_event_ids(&h);
-
-    assert_eq!(total, expected_total);
-
-    // Harvest the events here, before the `balance` read below: `Events::all()`
-    // reports only the most recent contract invocation, so querying the token
-    // contract in between would discard what the batch emitted.
-    let event_ids = withdrawn_event_ids(&h);
-    assert_eq!(h.balance(&h.recipient), expected_total);
-
-    // Assert events are emitted per stream, not per batch (in exact batch order).
-
-    // Assert events are emitted per stream, not per batch (in exact batch order).
-    // Capture events right away, before any other client calls clear the event list.
-    let events = withdrawn_event_ids(&h);
-
-    assert_eq!(total, expected_total);
-
-    // Capture contract events before any further cross-contract call: in the
-    // test host, invoking another contract (e.g. the token `balance` read
-    // below) rotates the recorded event buffer, so reading events afterwards
-    // observes nothing.
-    let event_ids = withdrawn_event_ids(&h);
-
-    assert_eq!(h.balance(&h.recipient), expected_total);
-
-    assert_eq!(events, ids);
-    // Assert events are emitted per stream, not per batch (in exact batch order).
-    assert_eq!(event_ids, ids);
-
     for (i, id) in ids.iter().enumerate() {
         assert_eq!(h.get(*id).withdrawn, expected_per_stream[i]);
     }

@@ -37,6 +37,7 @@ fn stream_of(
 ) -> Stream {
     let env = Env::default();
     Stream {
+        reference: None,
         sender: Address::generate(&env),
         recipient: Address::generate(&env),
         token: Address::generate(&env),
@@ -53,6 +54,7 @@ fn stream_of(
         paused_total: 0,
         status: StreamStatus::Active,
         curve: ReleaseCurve::Linear,
+        reference: None,
     }
 }
 

@@ -50,19 +50,34 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve, relative } from "node:path";
-import { createHash } from "node:crypto";
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const BASELINE_PATH = resolve(REPO_ROOT, "scripts", "lint-baseline.json");
 const UPDATE_BASELINE = process.argv.includes("--update-baseline");
 
 function run(cmd, args, opts = {}) {
-  return spawnSync(cmd, args, {
+  const result = spawnSync(cmd, args, {
     cwd: REPO_ROOT,
     encoding: "utf-8",
+    maxBuffer: 16 * 1024 * 1024,
     env: { ...process.env, CARGO_TERM_COLOR: "never" },
     ...opts,
   });
+  if (result.error || result.signal || result.status === null) {
+    failTool(
+      `${cmd} ${args[0]}`,
+      result,
+      result.error?.message || `terminated by ${result.signal || "an unknown signal"}`
+    );
+  }
+  return result;
+}
+
+function failTool(label, result, detail) {
+  console.error(`[lint:full] ERROR — ${label}: ${detail}`);
+  if (result.stderr) process.stderr.write(result.stderr);
+  // Incomplete runs must never pass or replace the committed baseline.
+  process.exit(2);
 }
 
 // ---- Baseline file helpers ------------------------------------------------
@@ -108,7 +123,7 @@ function saveBaseline(fingerprints, metadata) {
 
 function parseFmtViolations(stdout) {
   const fps = [];
-  const re = /Diff in (.+?)(?:\r?\n|$)/g;
+  const re = /^Diff in (.+):(\d+):\r?$/gm;
   let m;
   while ((m = re.exec(stdout)) !== null) {
     const file = relative(REPO_ROOT, m[1].trim()).replace(/\\/g, "/");
@@ -124,46 +139,37 @@ function parseFmtViolations(stdout) {
 
 // ---- clippy diagnostic capture --------------------------------------------
 //
-// clippy writes machine-parseable diagnostics to stderr in the form:
-//   error[E0308]: ...
-//     --> path/to/file.rs:42:18
-//      = note: ...
-//
-// We parse blocks bounded by the `error[` / `warning[` header and the
-// following `--> file:line:col` to build a code + file fingerprint.
-//
-// Alternative: `--message-format json` is more robust but produces very
-// verbose output; the text parser is sufficient for our fingerprinting and
-// keeps the human-readable log flowing.
+// Clippy's human-readable headers often omit the lint code entirely. Cargo's
+// JSON stream preserves it (including names such as clippy::needless_return)
+// and includes build-finished so incomplete output cannot look like a pass.
 
-function parseClippyDiagnostics(stderr) {
+function parseClippyDiagnostics(stdout) {
   const fps = [];
-  const lines = stderr.split(/\r?\n/);
-  let current = null;
-
-  for (const line of lines) {
-    const header = line.match(/^(error|warning)\[([A-Za-z0-9_-]+)\]:/);
-    if (header) {
-      if (current && current.file) fps.push(current);
-      current = {
-        source: "clippy",
-        severity: header[1],
-        code: header[2],
-        file: null,
-        detail: line.trim(),
-      };
-      continue;
+  let finished;
+  for (const line of stdout.split(/\r?\n/).filter((line) => line.trim())) {
+    const entry = JSON.parse(line);
+    if (entry.reason === "build-finished") {
+      finished = entry.success;
     }
-    if (!current) continue;
-    const loc = line.match(/^\s+-->\s+(.+?):(\d+):(\d+)/);
-    if (loc) {
-      const file = relative(REPO_ROOT, loc[1].trim()).replace(/\\/g, "/");
-      current.file = file;
+    if (entry.reason !== "compiler-message") continue;
+    const diagnostic = entry.message;
+    if (!["error", "warning"].includes(diagnostic.level)) continue;
+    const span = diagnostic.spans.find((span) => span.is_primary);
+    const code = diagnostic.code?.code;
+    if (!code || !span?.file_name) {
+      throw new Error(diagnostic.rendered || diagnostic.message);
     }
+    fps.push({
+      source: "clippy",
+      severity: diagnostic.level,
+      code,
+      file: relative(REPO_ROOT, resolve(REPO_ROOT, span.file_name)).replace(/\\/g, "/"),
+      detail: diagnostic.rendered || diagnostic.message,
+    });
   }
-  if (current && current.file) fps.push(current);
+  if (typeof finished !== "boolean") throw new Error("missing build-finished diagnostic");
 
-  return fps.map((d) => {
+  const violations = fps.map((d) => {
     // Package = first two path segments for workspace packages, else "root".
     let pkg = "workspace-root";
     if (d.file.startsWith("contracts/stream/")) pkg = "fluxora-stream";
@@ -175,6 +181,7 @@ function parseClippyDiagnostics(stderr) {
     const fingerprint = `${pkg}::${d.file}::${d.source}::${d.code || "no-code"}`;
     return { ...d, fingerprint };
   });
+  return { violations, finished };
 }
 
 // ---- Main ------------------------------------------------------------------
@@ -197,21 +204,40 @@ function main() {
   console.log("\n[lint:full] Step 1/2: cargo fmt --all --check");
   const fmt = run("cargo", ["fmt", "--all", "--", "--check"]);
   const fmtViolations = parseFmtViolations(fmt.stdout);
+  if (
+    fmt.status !== 0 &&
+    (fmt.status !== 1 || fmtViolations.length === 0 || /^error\b/m.test(fmt.stderr))
+  ) {
+    failTool("cargo fmt", fmt, `exited ${fmt.status} without a complete formatting result`);
+  }
 
   // 2. cargo clippy — workspace-wide, all targets, all features, hard fail
   console.log(
-    "[lint:full] Step 2/2: cargo clippy --workspace --all-targets --all-features -- -D warnings"
+    "[lint:full] Step 2/2: cargo clippy --workspace --all-targets --all-features --message-format=json -- -D warnings"
   );
   const clippy = run("cargo", [
     "clippy",
     "--workspace",
     "--all-targets",
     "--all-features",
+    "--message-format=json",
     "--",
     "-D",
     "warnings",
   ]);
-  const clippyViolations = parseClippyDiagnostics(clippy.stderr);
+  let clippyResult;
+  try {
+    clippyResult = parseClippyDiagnostics(clippy.stdout);
+  } catch (error) {
+    failTool("cargo clippy", clippy, error.message);
+  }
+  const clippyViolations = clippyResult.violations;
+  if (
+    clippyResult.finished !== (clippy.status === 0) ||
+    (clippy.status !== 0 && !clippyViolations.some((v) => v.severity === "error"))
+  ) {
+    failTool("cargo clippy", clippy, `exited ${clippy.status} without a complete diagnostic result`);
+  }
 
   // Aggregate
   const allViolations = [...fmtViolations, ...clippyViolations];

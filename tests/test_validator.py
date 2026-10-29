@@ -318,11 +318,12 @@ fn not_a_test() {}
             sys.argv = old_argv
         assert result == 0
 
-    def test_check_snapshot_diff_main_no_base(self):
-        """An invalid Git ref produces no changed snapshot files."""
+    def test_check_snapshot_diff_rejects_invalid_base(self):
+        """An invalid Git ref must not be reported as an empty diff."""
         mod = _import_script("check_snapshot_diff.py")
         assert mod is not None
-        assert mod.get_changed_files("HEAD~99999") == []
+        with pytest.raises(mod.SnapshotReadError, match="git diff failed"):
+            mod.get_changed_files("HEAD~99999")
 
     def test_check_snapshot_diff_main_real(self):
         """Exercise main() with a valid base ref."""
@@ -385,8 +386,9 @@ class TestScriptBranches:
         mod = _import_script("check-discriminant-collisions.py")
         assert mod is not None
         sections = mod._parse_docs(REPO_ROOT / "docs" / "ABI.md")
-        assert len(sections["ContractError (stream)"]) == 34
-        assert len(sections["ContractError (stream)"]) == 38
+        stream = sections["ContractError (stream)"]
+        assert len(stream) == 46
+        assert {entry.code for entry in stream} == set(range(1, 47))
 
     def test_validate_doc_alignment_with_streaming_md(self):
         """Exercise doc alignment with temp streaming.md."""

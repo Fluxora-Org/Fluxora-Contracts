@@ -499,10 +499,10 @@ fn forge_deposit(h: &Harness, id: u64, extra: i128) {
     let mut stream = h.get(id);
     stream.deposited += extra;
     h.env.as_contract(&h.contract_id, || {
-        h.env
-            .storage()
-            .persistent()
-            .set(&DataKey::Stream(id), &stream);
+        h.env.storage().persistent().set(
+            &DataKey::Stream(id),
+            &crate::types::StreamRecord::from_stream(&stream),
+        );
     });
 }
 

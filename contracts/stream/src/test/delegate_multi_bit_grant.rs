@@ -341,8 +341,13 @@ fn removing_bits_one_at_a_time_from_a_four_bit_grant() {
     );
 
     // -- Step 1: remove CANCEL --
-    h.client
-        .grant_delegate(&id, &h.sender, &agent, &(op::PAUSE | op::RESUME | op::TOP_UP), &None);
+    h.client.grant_delegate(
+        &id,
+        &h.sender,
+        &agent,
+        &(op::PAUSE | op::RESUME | op::TOP_UP),
+        &None,
+    );
 
     assert_eq!(
         delegate_call_result(&h, id, &agent, op::CANCEL),
@@ -388,12 +393,10 @@ fn removing_bits_one_at_a_time_from_a_four_bit_grant() {
 // Acceptance criterion 3 — clearing every bit is equivalent to revoking
 // ---------------------------------------------------------------------------
 
-/// Re-granting with `ops = 0` is the documented no-op (see `grant_delegate`
-/// ABI note and `grant_delegate_rejects_a_terminal_stream_and_zero_ops_grants_nothing`
-/// in delegation.rs). After a zero-bit re-grant the delegate is effectively
-/// ungrantable for every op.
+/// A zero-bit grant is a no-op even when a delegate already has permissions.
+/// Only an explicit revoke removes the existing grant.
 #[test]
-fn re_granting_zero_bits_revokes_all_ops() {
+fn re_granting_zero_bits_preserves_existing_grant() {
     let h = Harness::new();
     let id = h.create_simple(1_000 * ONE, 100 * DAY);
     let agent = Address::generate(&h.env);
@@ -404,26 +407,19 @@ fn re_granting_zero_bits_revokes_all_ops() {
     h.client
         .grant_delegate(&id, &h.sender, &agent, &(op::PAUSE | op::RESUME), &None);
 
-    // Re-grant with zero ops — equivalent to a revoke.
+    // Re-granting zero leaves the existing PAUSE | RESUME grant intact.
     h.client.grant_delegate(&id, &h.sender, &agent, &0, &None);
+    h.client.delegate_pause(&id, &agent);
+    h.client.delegate_resume(&id, &agent);
 
-    // Both previously granted bits are now rejected.
-    for &bit in &[op::PAUSE, op::RESUME] {
-        assert_eq!(
-            delegate_call_result(&h, id, &agent, bit),
-            Err(Error::DelegateNotPermitted),
-            "op bit {bit}: must be rejected after zero-bit re-grant",
-        );
-    }
-
-    // Explicit revoke after a zero-bit grant is also a no-op (idempotent).
+    // Explicit revocation removes both permissions.
     h.client.revoke_delegate(&id, &h.sender, &agent);
 
     for &bit in &[op::PAUSE, op::RESUME] {
         assert_eq!(
             delegate_call_result(&h, id, &agent, bit),
             Err(Error::DelegateNotPermitted),
-            "op bit {bit}: must remain rejected after redundant revoke",
+            "op bit {bit}: must be rejected after explicit revoke",
         );
     }
 
@@ -555,13 +551,8 @@ fn resume_bit_not_in_grant_is_rejected_despite_pause_being_granted() {
     h.advance(10 * DAY);
 
     // Grant PAUSE and TOP_UP — but not RESUME.
-    h.client.grant_delegate(
-        &id,
-        &h.sender,
-        &agent,
-        &(op::PAUSE | op::TOP_UP),
-        &None,
-    );
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &(op::PAUSE | op::TOP_UP), &None);
 
     // Both granted ops work.
     h.client.delegate_pause(&id, &agent);
@@ -614,21 +605,18 @@ fn every_two_bit_sender_combo_permits_exactly_its_two_bits() {
                 h.client.pause(&id);
             }
 
-            h.client.grant_delegate(&id, &h.sender, &agent, &mask, &None);
+            h.client
+                .grant_delegate(&id, &h.sender, &agent, &mask, &None);
 
             // Both bits in the grant must succeed.
             for &granted_bit in &[bit_a, bit_b] {
                 // For RESUME the stream must be paused; for PAUSE it must be active.
                 // Normalise state before each op check.
                 let stream = h.client.get_stream(&id);
-                if granted_bit == op::RESUME
-                    && stream.status != crate::StreamStatus::Paused
-                {
+                if granted_bit == op::RESUME && stream.status != crate::StreamStatus::Paused {
                     h.client.pause(&id);
                 }
-                if granted_bit == op::PAUSE
-                    && stream.status == crate::StreamStatus::Paused
-                {
+                if granted_bit == op::PAUSE && stream.status == crate::StreamStatus::Paused {
                     h.client.resume(&id);
                 }
 
@@ -662,14 +650,10 @@ fn every_two_bit_sender_combo_permits_exactly_its_two_bits() {
                 }
                 // Normalise state for the absent-bit check.
                 let stream = h.client.get_stream(&id);
-                if absent_bit == op::RESUME
-                    && stream.status != crate::StreamStatus::Paused
-                {
+                if absent_bit == op::RESUME && stream.status != crate::StreamStatus::Paused {
                     h.client.pause(&id);
                 }
-                if absent_bit == op::PAUSE
-                    && stream.status == crate::StreamStatus::Paused
-                {
+                if absent_bit == op::PAUSE && stream.status == crate::StreamStatus::Paused {
                     h.client.resume(&id);
                 }
 

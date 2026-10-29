@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Contract-level emergency halt (issue #1818).
 //!
 //! # What this suite is for
@@ -39,7 +40,6 @@
 //! point with genuinely valid preconditions; the ordering is asserted
 //! independently by `halt_is_checked_before_validation_and_authorization`.
 
-#![cfg(test)]
 
 use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::{Address, Symbol, TryFromVal, TryIntoVal, Val};
@@ -338,6 +338,7 @@ fn halt_engages_the_halt_and_emits_an_event() {
 /// Negative: without the operator's authorization `halt` aborts and the
 /// contract stays live.
 #[test]
+#[should_panic(expected = "Unauthorized")]
 fn unauthorized_halt_does_not_engage_the_halt() {
     let h = Harness::new();
     h.client.set_halt_operator(&h.sender);
@@ -380,6 +381,7 @@ fn resume_contract_lifts_the_halt_and_emits_an_event() {
 
 /// Negative: only the operator can lift the halt.
 #[test]
+#[should_panic(expected = "Unauthorized")]
 fn unauthorized_resume_contract_leaves_the_contract_halted() {
     let h = Harness::new();
     h.client.set_halt_operator(&h.sender);
@@ -398,6 +400,7 @@ fn unauthorized_resume_contract_leaves_the_contract_halted() {
 /// One-shot semantics on both edges: halting twice and resuming when not
 /// halted are both typed errors rather than silent no-ops.
 #[test]
+#[should_panic(expected = "Unauthorized")]
 fn halt_and_resume_are_rejected_when_they_would_be_no_ops() {
     let h = Harness::new();
     h.client.set_halt_operator(&h.sender);

@@ -175,7 +175,7 @@ fn absent_optional_axes_default_to_permissive() {
     assert_eq!(policy.min_rate_per_second, None);
     assert_eq!(policy.max_rate_per_second, None);
 
-    // Explicitly storing `false` and clearing the bounds keep the same reading.
+    // Explicit false remains false; omitted setter bounds preserve existing values.
     factory.set_factory_paused(&true);
     assert!(f.policy().expect("loads").creation_paused);
     factory.set_factory_paused(&false);
@@ -184,6 +184,12 @@ fn absent_optional_axes_default_to_permissive() {
 
     factory.set_rate_bounds(&Some(3), &Some(9));
     factory.set_rate_bounds(&None, &None);
+    let preserved = f.policy().expect("loads");
+    assert_eq!(preserved.min_rate_per_second, Some(3));
+    assert_eq!(preserved.max_rate_per_second, Some(9));
+    // Removing the optional keys directly models a legacy policy without them.
+    f.remove(&DataKey::MinRatePerSecond);
+    f.remove(&DataKey::MaxRatePerSecond);
     let policy = f.policy().expect("loads");
     assert_eq!(policy.min_rate_per_second, None);
     assert_eq!(policy.max_rate_per_second, None);

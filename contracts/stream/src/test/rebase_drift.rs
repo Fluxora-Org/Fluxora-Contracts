@@ -428,13 +428,12 @@ fn a_drift_on_one_token_does_not_block_a_healthy_token() {
 
 // ─── ABI ─────────────────────────────────────────────────────────────────────
 
-/// The variant is appended, never renumbered: 34 is the next free slot after
-/// `VestedDecreased` (33). Also pinned in `test::error_discriminants`.
+/// The variant is appended, never renumbered: 39 follows the halt errors (34–38). Also pinned in `test::error_discriminants`.
 #[test]
 fn pool_balance_drift_discriminant_value() {
     assert_eq!(
         Error::PoolBalanceDrift as u32,
-        34,
-        "PoolBalanceDrift discriminant must be 34",
+        39,
+        "PoolBalanceDrift discriminant must be 39",
     );
 }

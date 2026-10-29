@@ -9,7 +9,7 @@
 use super::common::*;
 use crate::{Error, StreamStatus};
 use soroban_sdk::testutils::storage::Persistent as _;
-use soroban_sdk::testutils::Events;
+use soroban_sdk::testutils::{Events, Ledger as _};
 
 #[test]
 fn top_up_extends_the_end_date_at_the_same_rate() {
@@ -237,7 +237,7 @@ fn top_up_while_paused_never_reduces_vested_despite_fractional_rates() {
 
     // Fast-forward to the stretched end and confirm full delivery.
     let s = h.get(id);
-    let stretched_end = s.end_time;
+    let stretched_end = s.end_time + s.paused_total;
     h.warp_to(stretched_end);
     assert_eq!(
         h.client.vested_of(&id),
@@ -547,19 +547,14 @@ fn top_up_overflow_on_end_time_addition_is_rejected() {
     let h = Harness::new();
 
     // Create a stream ending near u64::MAX.
-    let start = 1_000_000u64;
-    let end = u64::MAX - 100; // Leave room for delta
+    let end = u64::MAX - 100;
+    let start = end - 1_000;
+    h.env.ledger().set_timestamp(start);
     let id = h.create(100_000, start, end, start, true, true, true);
 
-    // Top-up with an amount that would compute a huge delta.
-    // delta = amount * duration / deposited
-    // duration = u64::MAX - 100 - 1_000_000 = u64::MAX - 1_000_100 (large)
-    // If amount is large enough, delta could exceed u64::MAX - end.
-    let err = h
-        .client
-        .try_top_up(&id, &(i128::MAX / 2))
-        .unwrap_err()
-        .unwrap();
+    // A valid 100-stroop/second stream: the top-up buys 1,000 seconds,
+    // which overflows end_time while amount * duration itself remains safe.
+    let err = h.client.try_top_up(&id, &100_000).unwrap_err().unwrap();
     assert_eq!(err, Error::Overflow);
 
     // Stream is unchanged.

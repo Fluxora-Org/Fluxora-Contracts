@@ -6,8 +6,8 @@
 //! half-update an interval. This module pins:
 //!
 //! * every shape of the pair round-trips, including the two one-sided forms;
-//! * the pair **replaces** rather than merges, so clearing a side really clears
-//!   it (and leaves no value behind that a later read cannot decode);
+//! * supplied sides replace their stored values while omitted sides stay unchanged;
+//!   no update leaves behind an undecodable sentinel;
 //! * `0` and equal bounds are valid — an inclusive interval may be a point;
 //! * an inverted interval or a negative bound is refused with the named
 //!   `InvalidRateBounds` (discriminant 6) and leaves storage untouched;
@@ -80,121 +80,77 @@ fn assert_auth_fails<F: FnOnce()>(f: F) {
     );
 }
 
-/// Every shape of the pair round-trips through both read paths: neither side
-/// set, the minimum only, the maximum only, and both. Each write is followed by
-/// a large ledger jump before the read, which also proves the setter re-extended
-/// the instance entry's TTL — a bound that only survives until the next idle
-/// window would be worse than no bound at all.
+/// Every initial bound shape round-trips, including one-sided intervals.
 #[test]
 fn every_shape_of_the_pair_round_trips() {
-    let f = Fixture::new();
-    let factory = f.factory();
-
-    factory.set_rate_bounds(&None, &None);
-    f.advance(10_000);
-    assert_eq!(f.bounds(), (None, None));
-    assert_eq!(f.policy_bounds(), (None, None));
-
-    factory.set_rate_bounds(&Some(7), &None);
-    f.advance(10_000);
-    assert_eq!(f.bounds(), (Some(7), None));
-    assert_eq!(f.policy_bounds(), (Some(7), None));
-
-    factory.set_rate_bounds(&None, &Some(9_999));
-    f.advance(10_000);
-    assert_eq!(f.bounds(), (None, Some(9_999)));
-    assert_eq!(f.policy_bounds(), (None, Some(9_999)));
-
-    factory.set_rate_bounds(&Some(1), &Some(i128::MAX));
-    f.advance(10_000);
-    assert_eq!(f.bounds(), (Some(1), Some(i128::MAX)));
-    assert_eq!(f.policy_bounds(), (Some(1), Some(i128::MAX)));
-
-    assert_eq!(
-        factory.get_factory_config().stream_contract,
-        f.stream_contract,
-        "the interval round-trip must not touch the target stream contract",
-    );
+    for (min, max) in [
+        (None, None),
+        (Some(7), None),
+        (None, Some(9_999)),
+        (Some(1), Some(i128::MAX)),
+    ] {
+        let f = Fixture::new();
+        f.factory().set_rate_bounds(&min, &max);
+        f.advance(10_000);
+        assert_eq!(f.bounds(), (min, max));
+        assert_eq!(f.policy_bounds(), (min, max));
+        assert_eq!(
+            f.factory().get_factory_config().stream_contract,
+            f.stream_contract
+        );
+    }
 }
 
-/// The pair **replaces** both bounds; it never merges with what is stored. Once
-/// a side has been cleared it stays cleared until it is set again, and a
-/// one-sided update leaves the other side exactly as it was.
+/// The documented setter updates only supplied sides; None preserves storage.
 #[test]
-fn the_pair_replaces_and_never_merges() {
+fn supplied_bounds_replace_values_and_none_preserves_them() {
     let f = Fixture::new();
     let factory = f.factory();
-
     factory.set_rate_bounds(&Some(10), &Some(100));
-    assert_eq!(f.bounds(), (Some(10), Some(100)));
-
-    // Clearing the maximum must not resurrect the previous one, and must not
-    // touch the minimum.
-    factory.set_rate_bounds(&Some(10), &None);
-    assert_eq!(f.bounds(), (Some(10), None));
-
-    // Clearing the minimum must not resurrect the previous one either.
+    factory.set_rate_bounds(&Some(20), &None);
+    assert_eq!(f.bounds(), (Some(20), Some(100)));
+    factory.set_rate_bounds(&None, &Some(200));
+    assert_eq!(f.bounds(), (Some(20), Some(200)));
     factory.set_rate_bounds(&None, &None);
-    assert_eq!(f.bounds(), (None, None));
-    assert_eq!(f.policy_bounds(), (None, None));
-
-    // Replacing both sides in one call replaces both.
+    assert_eq!(f.bounds(), (Some(20), Some(200)));
+    assert_eq!(f.policy_bounds(), f.bounds());
     factory.set_rate_bounds(&Some(2), &Some(3));
     factory.set_rate_bounds(&Some(4), &Some(5));
     assert_eq!(f.bounds(), (Some(4), Some(5)));
     assert_eq!(f.policy_bounds(), (Some(4), Some(5)));
 }
 
-/// The interval is inclusive, so `0` and equal bounds are valid policy rather
-/// than misconfigurations: `0..=0` is a degenerate but expressible interval, and
-/// `i128::MAX` on the maximum side is accepted.
+/// Inclusive intervals permit zero and equal bounds, including partial updates.
 #[test]
 fn zero_and_equal_bounds_are_accepted() {
     let f = Fixture::new();
     let factory = f.factory();
-
     factory.set_rate_bounds(&Some(0), &Some(0));
     assert_eq!(f.bounds(), (Some(0), Some(0)));
-
     factory.set_rate_bounds(&Some(5), &Some(5));
     assert_eq!(f.bounds(), (Some(5), Some(5)));
-
-    // A zero minimum with an open maximum: the lower bound is still meaningful.
     factory.set_rate_bounds(&Some(0), &None);
-    assert_eq!(f.bounds(), (Some(0), None));
+    assert_eq!(f.bounds(), (Some(0), Some(5)));
     factory.set_rate_bounds(&None, &Some(0));
-    assert_eq!(f.bounds(), (None, Some(0)));
+    assert_eq!(f.bounds(), (Some(0), Some(0)));
 }
 
-/// Clearing a bound leaves nothing behind that the policy cannot read back.
-///
-/// Regression: storing an `Option<i128>::None` sentinel encodes to `Void`, which
-/// this SDK's decoder rejects for `Option<i128>` — so the *next* `load_policy`
-/// would fail with an opaque host type error. Clearing must therefore remove the
-/// key. This asserts the whole read path still works after a clear, which is the
-/// shape the storage-sentinel bug would break.
+/// An omitted bound must never write an undecodable Void sentinel over a value.
 #[test]
-fn clearing_a_bound_leaves_no_undecodable_sentinel() {
+fn omitted_bounds_preserve_decodable_policy_values() {
     let f = Fixture::new();
     let factory = f.factory();
-
     factory.set_rate_bounds(&Some(1), &Some(100));
     factory.set_rate_bounds(&None, &None);
-
-    // Every read of the policy must still succeed, and report unrestricted.
-    assert_eq!(f.bounds(), (None, None));
-    assert_eq!(f.policy_bounds(), (None, None));
+    assert_eq!(f.bounds(), (Some(1), Some(100)));
+    assert_eq!(f.policy_bounds(), (Some(1), Some(100)));
     assert!(!factory.is_factory_paused());
     factory.assert_creation_allowed();
-
-    // Clearing one side only is the same shape: the cleared side reads `None`
-    // and the kept side keeps its value.
-    factory.set_rate_bounds(&Some(2), &Some(200));
     factory.set_rate_bounds(&Some(2), &None);
-    assert_eq!(f.bounds(), (Some(2), None));
+    assert_eq!(f.bounds(), (Some(2), Some(100)));
     factory.set_rate_bounds(&None, &Some(200));
-    assert_eq!(f.bounds(), (None, Some(200)));
-    assert_eq!(f.policy_bounds(), (None, Some(200)));
+    assert_eq!(f.bounds(), (Some(2), Some(200)));
+    assert_eq!(f.policy_bounds(), (Some(2), Some(200)));
 }
 
 /// An inverted interval (`min > max`) is refused with the named
@@ -208,6 +164,8 @@ fn an_inverted_interval_is_rejected_without_touching_storage() {
     factory.set_rate_bounds(&Some(10), &Some(100));
 
     for (min, max) in [
+        (Some(101), None),
+        (None, Some(9)),
         (Some(200), Some(50)),
         (Some(101), Some(100)),
         (Some(i128::MAX), Some(0)),

@@ -294,6 +294,15 @@ pub struct StreamRecord {
     pub status: StreamStatus,
 }
 
+/// Optional v2 fields stored beside the immutable v1 record layout.
+/// Absence means a schedule-clock cliff and no reference.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamMetadata {
+    pub cliff_mode: CliffMode,
+    pub reference: Option<String>,
+}
+
 /// One element in an atomic payroll-style stream creation batch.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -487,4 +496,7 @@ pub enum DataKey {
     /// [`crate::FluxoraStream::create_stream_split`]. A plain single-recipient
     /// stream has no entry here. The TTL mirrors the parent stream entry.
     StreamShares(u64),
+    /// Persistent storage. Non-default cliff mode and optional reference.
+    /// Kept alive with the parent stream; absent for legacy/default streams.
+    StreamMetadata(u64),
 }

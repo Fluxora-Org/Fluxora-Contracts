@@ -11,9 +11,9 @@ Last verified: 2026-08-29 (PR #1665)
 
 | Entrypoint | Description |
 |---|---|
-| `create_stream` | Create a new payment stream with deposit, schedule, and capability flags |
 | `batch_create` | Atomically create multiple payment streams in one transaction |
 | `create_stream` | Create a new payment stream with deposit, schedule, and capability flags (`cliff_mode` is `Schedule`) |
+| `create_stream_with_curve` | Create with an immutable explicit release curve (sender auth) |
 | `create_stream_with_cliff_mode` | Same as `create_stream`, plus an explicit `cliff_mode` choosing whether the cliff gate is read on the stream clock or the wall clock |
 | `top_up` | Extend stream duration at a fixed rate (sender auth) |
 | `withdraw` | Pull accrued balance; `None` = withdraw max |
@@ -64,3 +64,11 @@ Last verified: 2026-08-29 (PR #1665)
 | `set_halt_operator` | Install the one-shot halt operator (named operator auth; no rotation) |
 | `halt` | Refuse every state-changing entry point contract-wide (operator auth) |
 | `resume_contract` | Lift the halt and restore settlement (operator auth) |
+
+### Additional current entry points
+
+| Entry point | Authorization | Behavior |
+|---|---|---|
+| `reclaim_dust` | sender | Refund only terminal-stream liability not owed to the recipient. |
+| `create_stream_via_factory` | sender | Validate the selected factory policy, then create a stream. |
+| `upgradeable` | none | Report the immutable upgrade posture (`false`). |

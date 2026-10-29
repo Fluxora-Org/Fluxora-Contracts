@@ -120,6 +120,9 @@ fn the_boundary_tracks_the_population_as_it_grows() {
         // name the new id and carry the full initial state.
         let stream = h.get(id);
         let expected = StreamCreated {
+            reference: None,
+            curve: crate::ReleaseCurve::Linear,
+            cliff_mode: crate::CliffMode::Schedule,
             stream_id: id,
             sender: h.sender.clone(),
             recipient: h.recipient.clone(),
@@ -131,6 +134,9 @@ fn the_boundary_tracks_the_population_as_it_grows() {
             cancellable: true,
             pausable: true,
             transferable: true,
+            curve: stream.curve,
+            cliff_mode: stream.cliff_mode,
+            reference: stream.reference.clone(),
         };
         assert_eq!(
             events,
@@ -239,10 +245,10 @@ fn an_id_beyond_the_count_is_distinguishable_from_an_archived_id() {
     // Restore the archived entry — the client action the docs prescribe — and
     // the same id is readable again without the counter having moved.
     h.env.as_contract(&h.contract_id, || {
-        h.env
-            .storage()
-            .persistent()
-            .set(&DataKey::Stream(archived), &archived_stream);
+        h.env.storage().persistent().set(
+            &DataKey::Stream(archived),
+            &crate::types::StreamRecord::from_stream(&archived_stream),
+        );
     });
     assert!(h.client.stream_exists(&archived));
     assert_eq!(
@@ -463,12 +469,18 @@ fn the_boundary_scenario_conserves_funds_end_to_end() {
     assert_eq!(h.pool(), deposited - paid);
     assert_eq!(h.get(drained).withdrawn, paid);
     let expected = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
         stream_id: drained,
         recipient: h.recipient.clone(),
         amount: paid,
         withdrawn: paid,
         deposited: 1_000 * ONE,
         status: StreamStatus::Active,
+        sender: h.sender.clone(),
+        paused_at: None,
+        paused_total: 0,
     };
     assert_eq!(
         events,
@@ -498,6 +510,8 @@ fn the_boundary_scenario_conserves_funds_end_to_end() {
     );
     assert_eq!(h.client.withdrawable_of(&cancelled), 300 * ONE);
     let expected = Cancelled {
+        paused_at: None,
+        paused_total: 0,
         stream_id: cancelled,
         sender: h.sender.clone(),
         recipient: h.recipient.clone(),
@@ -505,6 +519,8 @@ fn the_boundary_scenario_conserves_funds_end_to_end() {
         vested: 300 * ONE,
         withdrawn: 0,
         end_time: T0 + 30 * DAY,
+        paused_at: settled.paused_at,
+        paused_total: settled.paused_total,
     };
     assert_eq!(
         events,

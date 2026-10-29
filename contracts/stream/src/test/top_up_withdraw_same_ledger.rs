@@ -469,9 +469,8 @@ fn both_orderings_agree_on_outcome() {
 fn conservation_holds_across_top_up_amounts() {
     // Fractional rate: 1_000 stroops over 300 seconds = 3.33/sec.
     let start = T0;
-    let h = Harness::new();
-
     for top_up_amount in [7i128, 13, 101, 1_000, 7_777, 100_000] {
+        let h = Harness::new();
         let id = h.create(1_000, start, start + 300, start, true, true, true);
 
         h.advance(150);

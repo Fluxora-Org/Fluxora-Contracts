@@ -72,6 +72,11 @@ while IFS=$'\t' read -r name directory feature; do
   # --timeout is raised from tarpaulin's 60s default: instrumented proptest
   # suites (test_withdrawable_props) exceed it and abort the run with
   # "Timed out waiting for test response" (seen on PR coverage runs).
+  # -p selects test binaries, but tarpaulin still discovers source throughout
+  # the workspace. Scope each report to its own crate, otherwise unrelated
+  # crates and their uncompiled legacy test helpers count as uncovered lines.
+  # Exclude only conventional test paths; all production sources in the crate
+  # remain eligible, including uncovered code and binary entry points.
   rm -rf "${OUTPUT_DIR:?}/${name}"
   cargo tarpaulin \
     "${feature_args[@]}" \
@@ -79,6 +84,8 @@ while IFS=$'\t' read -r name directory feature; do
     --out Html \
     --output-dir "${OUTPUT_DIR}/${name}" \
     --ignore-tests \
+    --include-files "${directory}/*" \
+    --exclude-files "${directory}/tests/*" "${directory}/src/test.rs" "${directory}/src/test/*" \
     --skip-clean \
     --timeout "${TIMEOUT}" \
     -p "${name}"

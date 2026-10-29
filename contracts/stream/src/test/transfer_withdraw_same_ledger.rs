@@ -167,12 +167,18 @@ fn withdraw_then_transfer_in_the_same_ledger_splits_exactly_once() {
     // Emitted events: one `withdrawn` from the first call, one
     // `recipient_transferred` from the second, each pinned to ground truth.
     let expected_withdrawn = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: after_withdraw.paused_at,
+        paused_total: after_withdraw.paused_total,
         stream_id: id,
         recipient: h.recipient.clone(),
         amount: payout,
         withdrawn: after_withdraw.withdrawn,
         deposited: after_withdraw.deposited,
         status: after_withdraw.status,
+        sender: h.sender.clone(),
+        paused_at: after_withdraw.paused_at,
+        paused_total: after_withdraw.paused_total,
     };
     assert_eq!(
         withdraw_events,
@@ -183,9 +189,11 @@ fn withdraw_then_transfer_in_the_same_ledger_splits_exactly_once() {
         &h,
         &transfer_events,
         RecipientTransferred {
+            sender: h.sender.clone(),
             stream_id: id,
             old_recipient: h.recipient.clone(),
             new_recipient: h.other.clone(),
+            sender: h.sender.clone(),
         },
         "withdraw then transfer",
     );
@@ -253,9 +261,11 @@ fn transfer_then_withdraw_in_the_same_ledger_pays_only_the_new_recipient() {
         &h,
         &transfer_events,
         RecipientTransferred {
+            sender: h.sender.clone(),
             stream_id: id,
             old_recipient: h.recipient.clone(),
             new_recipient: h.other.clone(),
+            sender: h.sender.clone(),
         },
         "transfer then withdraw: transfer event",
     );
@@ -275,12 +285,18 @@ fn transfer_then_withdraw_in_the_same_ledger_pays_only_the_new_recipient() {
     assert_eq!(h.balance(&h.other) - new_before, 150 * ONE);
 
     let expected_withdrawn = Withdrawn {
+        sender: h.sender.clone(),
+        paused_at: settled.paused_at,
+        paused_total: settled.paused_total,
         stream_id: id,
         recipient: h.other.clone(),
         amount: payout,
         withdrawn: settled.withdrawn,
         deposited: settled.deposited,
         status: settled.status,
+        sender: h.sender.clone(),
+        paused_at: settled.paused_at,
+        paused_total: settled.paused_total,
     };
     assert_eq!(
         withdraw_events,
