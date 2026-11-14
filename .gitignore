@@ -34,3 +34,4 @@ test_snapshots/
 batch_test_output.txt
 script/testnet-exercise.log
 *.log
+config.bat
