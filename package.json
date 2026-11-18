@@ -2,7 +2,11 @@
   "name": "fluxora-contracts",
   "version": "1.0.0",
   "private": true,
-  "description": "Fluxora — continuous payment streaming contracts for Soroban. Lint task runners for Rust clippy/fmt with changed-files fast-path and regression baseline.",
+  "description": "Fluxora \u2014 continuous payment streaming contracts for Soroban. Lint task runners for Rust clippy/fmt with changed-files fast-path and regression baseline.",
+  "dependencies": {
+    "dotenv": "^8.2.0",
+    "node-fetch": "^3.3.2"
+  },
   "scripts": {
     "test:lint": "node --test scripts/tests/*.test.mjs",
     "lint:ci": "node scripts/lint-changed-files.mjs",
