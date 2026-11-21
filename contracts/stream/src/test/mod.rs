@@ -28,6 +28,10 @@ mod error_reachability;
 // halt/resume, and the "every mutating entry point is refused while reads
 // still answer" acceptance test.
 mod halt;
+// Issue — `halt` driven from every stream status (Active, Paused, Cancelled,
+// Matured): each outcome asserted as a value or typed error, and a terminal
+// stream left unmutated by a refused call.
+mod halt_status;
 // Issue #2047 — `halt` boundary behaviour: zero, one, the maximum accepted
 // value, and one past it, pinned on both the halt state and the ledger
 // timestamp it records. Every refusal is a typed error and nothing panics.
