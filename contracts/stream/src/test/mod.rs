@@ -1,14 +1,14 @@
-//! Test suite, staged to match the build order.
-//!
-//! * **Stage 1** — data model, create, withdraw, views, plus the two tests that
-//!   gate everything else: the accrual property suite and the pool invariant.
-//! * **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
-//!   every adversarial boundary case.
-//! * **Stage 3** — TTL survival and archival recovery, resource consumption at
-//!   the batch cap.
-//! * **Stage 4** — the stream id invariant: unique, strictly monotonic, and
-//!   never consumed or reused by a failed create, independent of fixture
-//!   order.
+/// Test suite, staged to match the build order.
+///
+/// * **Stage 1** — data model, create, withdraw, views, plus the two tests that
+///   gate everything else: the accrual property suite and the pool invariant.
+/// * **Stage 2** — cliff, cancel, pause/resume, top-up, recipient transfer, and
+///   every adversarial boundary case.
+/// * **Stage 3** — TTL survival and archival recovery, resource consumption at
+///   the batch cap.
+/// * **Stage 4** — the stream id invariant: unique, strictly monotoonic, and
+///   never consumed or reused by a failed create, independent of fixture
+///   order.
 
 mod common;
 mod events;
@@ -71,7 +71,7 @@ mod cliff_mode;
 // Issue #1824: `delegate_top_up` held to the rejection depth of `top_up`.
 mod delegate_top_up;
 mod delegation;
-// Issue #1845: delegation surviving a recipient transfer.
+// Issue #1845 — delegation surviving a recipient transfer.
 mod delegation_transfer;
 // Repeat-submission coverage for `delegate_pause`: a second call is refused
 // with `StreamAlreadyPaused`, state is preserved, no tokens move, and no
